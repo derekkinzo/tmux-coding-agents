@@ -1,0 +1,15 @@
+# Shellcheck configuration for tmux-coding-agents
+# Severity: warning (pedantic-but-not-paranoid)
+
+# SC1090: source path can't be statically determined.
+# We source from $PLUGIN_ROOT/lib at runtime; shellcheck cannot follow it.
+disable=SC1090
+
+# SC1091: source not following.
+# Same reason as SC1090; runtime-resolved paths.
+disable=SC1091
+
+# SC2155: declare and assign separately.
+# Convention in our codebase favors `local x="$(cmd)"` for terseness when the
+# return value of `cmd` is not load-bearing for `$?`. Acknowledged tradeoff.
+disable=SC2155

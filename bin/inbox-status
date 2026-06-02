@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# bin/inbox-status — emit the tmux status-bar segment.
+#
+# Wired by the user via:
+#   set -ag status-right ' #(~/.tmux/plugins/tmux-coding-agents/bin/inbox-status)'
+#
+# tmux re-evaluates this script on every status-interval. The script reads the
+# TSV under LOCK_SH, counts states, formats a compact segment with embedded
+# tmux #[fg=...] markup. Renders empty when nothing is actionable.
+#
+# Behavior:
+#   - opportunistic GC of dead PIDs while we're here (cheap; runs outside lock
+#     by computing alive set first, then handing to state::gc)
+#   - never blocks Claude or tmux: lock timeout → emit empty string
+#   - all rendered output passes through render::scrub_ansi for terminal-safety
+
+set -uo pipefail
+
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+. "$PLUGIN_ROOT/lib/state.sh"
+# shellcheck disable=SC1091
+. "$PLUGIN_ROOT/lib/render.sh"
+
+# Opportunistic GC: gather alive claude PIDs, hand to state::gc.
+gc_if_due() {
+  local cache_dir tag now last
+  cache_dir="$(state::cache_dir)" 2>/dev/null || return 0
+  tag="$cache_dir/.gc-last"
+  now="$(date +%s)"
+  # Run GC at most once per 10 seconds.
+  last=0
+  [ -r "$tag" ] && last="$(cat "$tag" 2>/dev/null || echo 0)"
+  case "$last" in *[!0-9]*|'') last=0 ;; esac
+  if [ $((now - last)) -lt 10 ]; then
+    return 0
+  fi
+  printf '%s' "$now" > "$tag" 2>/dev/null || true
+  # Compute alive set: every claude PID this user has running.
+  local alive
+  alive="$(pgrep -u "$(id -u)" -x claude 2>/dev/null || true)"
+  printf '%s\n' "$alive" | state::gc 2>/dev/null || true
+}
+
+gc_if_due
+
+waiting="$(state::count waiting 2>/dev/null || echo 0)"
+working="$(state::count working 2>/dev/null || echo 0)"
+
+# render::status emits empty when both are 0 — perfect for status-right
+# (segment disappears entirely in the steady idle state).
+render::status "$waiting" "$working"
+exit 0

@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# bin/install-hooks — wire tmux-coding-agents into ~/.claude/settings.json.
+#
+# Idempotent: re-running filters out our prior entries before re-adding.
+# Safe: backs up settings.json before mutation; validates JSON parses before
+# replacing.
+#
+# Requires: jq (we just edit ~/.claude/settings.json — that's a JSON-mutating
+# operation; pure-bash JSON parsing is too risky here per audit).
+
+set -euo pipefail
+
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HOOK_BIN="$PLUGIN_ROOT/bin/hook"
+SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+
+err() {
+  printf 'install-hooks: %s\n' "$*" >&2
+}
+
+if ! command -v jq >/dev/null 2>&1; then
+  err "jq is required (https://stedolan.github.io/jq/)"
+  exit 1
+fi
+
+if [ ! -x "$HOOK_BIN" ]; then
+  err "hook script not found or not executable: $HOOK_BIN"
+  exit 1
+fi
+
+# Ensure settings.json exists.
+mkdir -p "$(dirname "$SETTINGS")"
+if [ ! -f "$SETTINGS" ]; then
+  printf '{}\n' > "$SETTINGS"
+fi
+
+# Validate before mutation.
+if ! jq -e . "$SETTINGS" >/dev/null 2>&1; then
+  err "$SETTINGS is not valid JSON; refusing to modify"
+  exit 1
+fi
+
+# Backup.
+backup="$SETTINGS.bak.$(date +%s)"
+cp "$SETTINGS" "$backup"
+
+# Build the new settings.json:
+# 1. Remove any existing hooks whose command references our HOOK_BIN basename
+#    "tmux-coding-agents/bin/hook" (idempotent re-install).
+# 2. Add fresh entries for each hook event.
+events='SessionStart UserPromptSubmit PreToolUse PostToolUse Notification Stop SessionEnd'
+
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+
+jq --arg hook "$HOOK_BIN" --arg events "$events" '
+  def filter_ours(h):
+    (h.hooks // [])
+    | map(select(((.command // "") | contains("tmux-coding-agents/bin/hook")) | not));
+
+  def remove_ours_from_event(ev):
+    .hooks[ev] = (
+      ((.hooks[ev] // [])
+        | map({
+            matcher: (.matcher // ""),
+            hooks: filter_ours(.)
+          })
+        | map(select((.hooks | length) > 0))
+      )
+    );
+
+  def add_for_event(ev):
+    .hooks[ev] = (
+      (.hooks[ev] // [])
+      + [{
+          hooks: [{
+            type: "command",
+            command: ("bash " + $hook + " " + ev),
+            timeout: 5
+          }]
+        }]
+    );
+
+  .hooks = (.hooks // {})
+  | reduce ($events | split(" ")[]) as $ev (.; remove_ours_from_event($ev))
+  | reduce ($events | split(" ")[]) as $ev (.; add_for_event($ev))
+' "$SETTINGS" > "$tmp"
+
+# Validate the result before swapping.
+if ! jq -e . "$tmp" >/dev/null 2>&1; then
+  err "merge produced invalid JSON; aborting (backup at $backup)"
+  exit 1
+fi
+
+mv "$tmp" "$SETTINGS"
+
+cat <<EOF
+tmux-coding-agents: hooks installed in $SETTINGS
+                    backup at $backup
+
+Wired event handlers: $events
+Hook command: bash $HOOK_BIN <EventName>
+
+Existing Claude Code sessions will pick up the hooks on their next turn.
+EOF

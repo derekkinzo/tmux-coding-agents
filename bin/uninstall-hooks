@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# bin/uninstall-hooks — remove tmux-coding-agents from ~/.claude/settings.json.
+#
+# Filters out any hook whose command references our hook binary, then writes
+# back. Backs up first.
+
+set -euo pipefail
+
+SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+
+err() {
+  printf 'uninstall-hooks: %s\n' "$*" >&2
+}
+
+if ! command -v jq >/dev/null 2>&1; then
+  err "jq is required"
+  exit 1
+fi
+
+if [ ! -f "$SETTINGS" ]; then
+  err "$SETTINGS not found; nothing to do"
+  exit 0
+fi
+
+if ! jq -e . "$SETTINGS" >/dev/null 2>&1; then
+  err "$SETTINGS is not valid JSON; refusing to modify"
+  exit 1
+fi
+
+backup="$SETTINGS.bak.$(date +%s)"
+cp "$SETTINGS" "$backup"
+
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+
+jq '
+  def filter_ours(h):
+    (h.hooks // [])
+    | map(select(((.command // "") | contains("tmux-coding-agents/bin/hook")) | not));
+
+  if .hooks == null then .
+  else
+    .hooks = (
+      .hooks
+      | with_entries(
+          .value = (
+            .value
+            | map({
+                matcher: (.matcher // ""),
+                hooks: filter_ours(.)
+              })
+            | map(select((.hooks | length) > 0))
+          )
+        )
+      | with_entries(select((.value | length) > 0))
+    )
+  end
+' "$SETTINGS" > "$tmp"
+
+if ! jq -e . "$tmp" >/dev/null 2>&1; then
+  err "filter produced invalid JSON; aborting (backup at $backup)"
+  exit 1
+fi
+
+mv "$tmp" "$SETTINGS"
+
+cat <<EOF
+tmux-coding-agents: hooks removed from $SETTINGS
+                    backup at $backup
+EOF

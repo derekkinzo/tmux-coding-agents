@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# bin/inbox-pick — open the picker (display-popup → choose-tree).
+#
+# Bound by tmux-coding-agents.tmux to `prefix + <pick-key>`.
+#
+# Behavior:
+#   - if hooks not installed → display-message pointing to install-hooks; exit
+#   - if no tracked panes   → display-message "no Claude sessions tracked yet"
+#   - else: build the filter expression for choose-tree and exec it
+#
+# Sort order: waiting first (by recency), working next, idle last.
+# Native preview is on by default (choose-tree's `v` toggles).
+
+set -uo pipefail
+
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+. "$PLUGIN_ROOT/lib/state.sh"
+# shellcheck disable=SC1091
+. "$PLUGIN_ROOT/lib/render.sh"
+
+SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+
+# Quick check: are our hooks wired? Use a sentinel file to avoid re-parsing
+# settings.json on every keypress (cached after first successful install).
+hooks_installed() {
+  local cache_dir tag mtime_settings mtime_tag
+  cache_dir="$(state::cache_dir)" 2>/dev/null || return 1
+  tag="$cache_dir/.hooks-installed"
+  if [ -r "$tag" ] && [ -r "$SETTINGS" ]; then
+    mtime_settings="$(date -r "$SETTINGS" +%s 2>/dev/null || stat -c %Y "$SETTINGS" 2>/dev/null || echo 0)"
+    mtime_tag="$(cat "$tag" 2>/dev/null || echo 0)"
+    case "$mtime_tag" in *[!0-9]*|'') mtime_tag=0 ;; esac
+    if [ "$mtime_tag" -ge "$mtime_settings" ]; then
+      return 0
+    fi
+  fi
+  if [ -r "$SETTINGS" ] \
+     && command -v jq >/dev/null 2>&1 \
+     && jq -e '
+       (.hooks // {}) | to_entries | any(.value | type == "array" and any(
+         .hooks // [] | any(.command // "" | contains("tmux-coding-agents/bin/hook"))))
+     ' "$SETTINGS" >/dev/null 2>&1; then
+    # Cache the verification.
+    if [ -n "$cache_dir" ]; then
+      mtime_settings="$(date -r "$SETTINGS" +%s 2>/dev/null || stat -c %Y "$SETTINGS" 2>/dev/null || echo 0)"
+      printf '%s' "$mtime_settings" > "$tag" 2>/dev/null || true
+    fi
+    return 0
+  fi
+  return 1
+}
+
+if ! hooks_installed; then
+  tmux display-message "tmux-coding-agents: hooks not installed — run: $PLUGIN_ROOT/bin/install-hooks"
+  exit 0
+fi
+
+# Get current tracked panes (sorted: waiting > working > idle).
+rows="$(state::read 2>/dev/null || true)"
+if [ -z "$rows" ]; then
+  tmux display-message "tmux-coding-agents: no Claude sessions tracked yet"
+  exit 0
+fi
+
+# Build a sorted list of pane_ids, with sort-key prefixed (status rank, then
+# since_epoch desc). Pipe through awk → sort → cut.
+sorted_pane_ids="$(
+  printf '%s\n' "$rows" \
+    | awk -F'\t' '{
+        # rank: 0 waiting, 1 working, 2 idle/other
+        s = $3
+        if (s == "waiting") r = 0
+        else if (s == "working") r = 1
+        else r = 2
+        # secondary: newer first (use 9999999999 - epoch for ascending sort)
+        inv = 9999999999 - $4
+        printf "%d\t%010d\t%s\n", r, inv, $1
+      }' \
+    | sort -t$'\t' -k1,1n -k2,2n \
+    | cut -f3
+)"
+
+if [ -z "$sorted_pane_ids" ]; then
+  tmux display-message "tmux-coding-agents: no Claude sessions tracked yet"
+  exit 0
+fi
+
+# Build a filter for choose-tree:  -f '#{||:#{==:#{pane_id},%17},#{==:#{pane_id},%18}}'
+# Compose iteratively to handle ≥1 panes safely.
+filter=""
+while IFS= read -r pid; do
+  [ -n "$pid" ] || continue
+  local_eq="#{==:#{pane_id},${pid}}"
+  if [ -z "$filter" ]; then
+    filter="$local_eq"
+  else
+    filter="#{||:${filter},${local_eq}}"
+  fi
+done <<<"$sorted_pane_ids"
+
+# Format string for each row. We embed our render::row output as a tmux format
+# fragment by walking the rows and producing a -F template. Since choose-tree
+# evaluates the format per-pane, we need ONE template that pulls dynamic data
+# from the running pane (#{pane_id}, #{pane_current_path}, etc.) AND merges
+# our state info. We pre-compute a per-pane format key by setting a tmux
+# user-option @inbox-row-<pane_id> from this script, then reference it.
+#
+# Each option holds the rendered row content for its pane, scrubbed.
+now_epoch="$(date +%s)"
+while IFS=$'\t' read -r pane_id _kind status since_epoch _pid project _tpath; do
+  [ -n "${pane_id:-}" ] || continue
+  age=$((now_epoch - since_epoch))
+  rendered="$(render::row "$status" "$project" "$age")"
+  # Set as a per-pane user option (works on tmux 3.2+).
+  tmux set-option -gq "@inbox-row-${pane_id}" "$rendered" 2>/dev/null || true
+done <<<"$rows"
+
+# Use that per-pane option in the format string.
+fmt='#{?#{pane_in_mode},,}#{E:@inbox-row-#{pane_id}}'
+
+# Open the popup with choose-tree filtered to our panes.
+exec tmux display-popup -E -h 70% -w 80% \
+  "tmux choose-tree -Zw -f '$filter' -F '$fmt'"

@@ -60,10 +60,8 @@ States: **waiting** (red `!`) → needs your input now; **working** (orange `▶
 - tmux 3.2+ (for `display-popup` and `choose-tree -f` filter)
 - bash 3.2+ (works with macOS system bash)
 - Claude Code with hooks support
-- `flock(1)`, `awk`, `sed` (preinstalled on every Linux/macOS)
-
-Optional: `jq` (used if present for faster JSON parsing in the hook installer;
-falls back to pure-bash otherwise).
+- `flock(1)`, `awk`, `sed`, `jq` (jq is on every modern dev system; we use it
+  for safe JSON parsing of adversarial hook payloads)
 
 ## Uninstall
 

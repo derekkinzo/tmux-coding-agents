@@ -61,9 +61,9 @@ tmux-coding-agents/
 ├── lib/                           # sourceable bash (.sh), no shebang at top, set -u clean
 │   ├── state.sh                   # state::upsert / state::remove / state::snapshot, flock guard
 │   ├── detect.sh                  # detect::is_tracked_agent <pane_id> → kind|""
-│   ├── transitions.sh             # transitions::next <kind> <event> <payload> → new_state
-│   ├── render.sh                  # render::row, render::status, color/icon, ANSI scrubber
-│   └── jsonpb.sh                  # tiny JSON peeker; uses jq if PATH-resolves, falls back to bash regex
+│   ├── transitions.sh             # transitions::next <kind> <current_state> <event> <payload> → new_state
+│   ├── render.sh                  # render::row, render::status, render::scrub_ansi, color/icon
+│   └── jsonpb.sh                  # JSON peeker (jq required — see Section 18)
 ├── tests/                         # bats-core + shellcheck targets
 │   ├── test_state.bats            # contention, atomic rename, flock timeout
 │   ├── test_transitions.bats      # table-driven: (kind, event, payload) → state

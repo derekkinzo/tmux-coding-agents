@@ -1,0 +1,121 @@
+#!/usr/bin/env bats
+# tests/test_transitions.bats — pure state-transition function.
+
+load test_helper
+
+setup() {
+  use_mocks
+  source "$LIB/jsonpb.sh"
+  source "$LIB/transitions.sh"
+}
+
+@test "UserPromptSubmit → working" {
+  run transitions::next claude idle UserPromptSubmit '{}'
+  assert_output "working"
+}
+
+@test "PreToolUse → working" {
+  run transitions::next claude waiting PreToolUse '{}'
+  assert_output "working"
+}
+
+@test "PostToolUse → working" {
+  run transitions::next claude working PostToolUse '{}'
+  assert_output "working"
+}
+
+@test "Notification permission_prompt → waiting" {
+  payload='{"notification":{"kind":"permission_prompt"}}'
+  run transitions::next claude working Notification "$payload"
+  assert_output "waiting"
+}
+
+@test "Notification permission_prompt via notification_type field → waiting" {
+  payload='{"notification_type":"permission_prompt"}'
+  run transitions::next claude working Notification "$payload"
+  assert_output "waiting"
+}
+
+@test "Notification non-permission preserves current state" {
+  payload='{"notification":{"kind":"auth_success"}}'
+  run transitions::next claude working Notification "$payload"
+  assert_output "working"
+}
+
+@test "Stop with clean message → idle" {
+  payload='{"last_assistant_message":"Done."}'
+  run transitions::next claude working Stop "$payload"
+  assert_output "idle"
+}
+
+@test "Stop with ASCII question → waiting" {
+  payload='{"last_assistant_message":"Should I do A or B?"}'
+  run transitions::next claude working Stop "$payload"
+  assert_output "waiting"
+}
+
+@test "Stop with full-width ？ → waiting (UTF-8 safe)" {
+  payload='{"last_assistant_message":"私は何をすべきですか？"}'
+  run transitions::next claude working Stop "$payload"
+  assert_output "waiting"
+}
+
+@test "Stop with Arabic ؟ → waiting" {
+  payload='{"last_assistant_message":"ما هذا؟"}'
+  run transitions::next claude working Stop "$payload"
+  assert_output "waiting"
+}
+
+@test "Stop with non-empty background_tasks → working" {
+  payload='{"last_assistant_message":"Building...","background_tasks":["task-1"]}'
+  run transitions::next claude working Stop "$payload"
+  assert_output "working"
+}
+
+@test "Stop with question AND background_tasks → working (bg wins)" {
+  # Per DESIGN Section 4: bg_count check happens before question detection
+  payload='{"last_assistant_message":"Should I do A or B?","background_tasks":["x"]}'
+  run transitions::next claude working Stop "$payload"
+  assert_output "working"
+}
+
+@test "Stop with empty payload → idle" {
+  run transitions::next claude working Stop '{}'
+  assert_output "idle"
+}
+
+@test "SessionEnd → empty (caller should remove row)" {
+  run transitions::next claude working SessionEnd '{}'
+  assert_output ""
+}
+
+@test "SessionEnd from untracked is a no-op (still empty)" {
+  run transitions::next claude '' SessionEnd '{}'
+  assert_output ""
+}
+
+@test "Unknown event preserves current state" {
+  run transitions::next claude working FrobnicateZot '{}'
+  assert_output "working"
+}
+
+@test "trailing whitespace before ? still detected" {
+  payload='{"last_assistant_message":"What now?   "}'
+  run transitions::next claude working Stop "$payload"
+  assert_output "waiting"
+}
+
+@test "very long message clamped without panic" {
+  long_msg=$(head -c 8000 /dev/urandom | base64 | tr -d '\n=' | head -c 7000)
+  payload=$(jq -nc --arg m "${long_msg}?" '{last_assistant_message: $m}')
+  run transitions::next claude working Stop "$payload"
+  assert_output "waiting"
+}
+
+@test "@inbox-question-detect=off skips heuristic" {
+  # mock var name: MOCK_OPT_ + tr-mapped key (@inbox-question-detect → _inbox_question_detect)
+  export MOCK_OPT__inbox_question_detect="off"
+  payload='{"last_assistant_message":"Done?"}'
+  run transitions::next claude working Stop "$payload"
+  assert_output "idle"
+}

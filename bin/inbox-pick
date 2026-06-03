@@ -102,11 +102,31 @@ done <<<"$sorted_pane_ids"
 # Format string for each row. We embed our render::row output as a tmux format
 # fragment by walking the rows and producing a -F template. Since choose-tree
 # evaluates the format per-pane, we need ONE template that pulls dynamic data
-# from the running pane (#{pane_id}, #{pane_current_path}, etc.) AND merges
-# our state info. We pre-compute a per-pane format key by setting a tmux
-# user-option @inbox-row-<pane_id> from this script, then reference it.
+# from the running pane AND merges our state info. We pre-compute a per-pane
+# format key by setting a tmux user-option @inbox-row-<pane_id> from this
+# script, then reference it.
 #
 # Each option holds the rendered row content for its pane, scrubbed.
+#
+# Leak prevention: on every invocation, first unset every existing
+# @inbox-row-* option that doesn't correspond to a currently-tracked pane.
+# Without this, options accumulate forever as panes come and go.
+
+# Unset stale @inbox-row-* options. show-options -g matches the literal "-g"
+# scope; tr -d strips quoting, awk extracts keys, set-option -u removes.
+tmux show-options -g 2>/dev/null \
+  | awk '/^@inbox-row-/ {print $1}' \
+  | while IFS= read -r opt; do
+      [ -n "$opt" ] || continue
+      # Compute the pane_id portion (strip "@inbox-row-" prefix).
+      opt_pane="${opt#@inbox-row-}"
+      # Keep only options whose pane is still in $sorted_pane_ids.
+      case $'\n'"$sorted_pane_ids"$'\n' in
+        *$'\n'"$opt_pane"$'\n'*) : ;;     # still tracked → keep
+        *) tmux set-option -gu "$opt" 2>/dev/null || true ;;
+      esac
+    done
+
 now_epoch="$(date +%s)"
 while IFS=$'\t' read -r pane_id _kind status since_epoch _pid project _tpath; do
   [ -n "${pane_id:-}" ] || continue

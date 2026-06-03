@@ -1,0 +1,9 @@
+{
+  "hook_event": "Stop",
+  "session_id": "abc-123",
+  "transcript_path": "/home/u/.claude/projects/foo/abc.jsonl",
+  "cwd": "/home/u/Projects/foo",
+  "pid": 12345,
+  "last_assistant_message": "I've prepared two approaches. Should I use approach A or approach B?",
+  "background_tasks": []
+}

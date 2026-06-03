@@ -21,10 +21,26 @@
 #   $XDG_CACHE_HOME/tmux-coding-agents/log
 #   one line per event: ISO-8601 ts \t pane_id \t event \t old_state \t new_state
 
-set -uo pipefail
+# NOTE on shell options:
+#   - set -u: catch unbound vars (we want bug visibility in dev, soft-fail in prod)
+#   - NO -e: we explicitly handle each fallible call so a single recoverable
+#     error (e.g. flock timeout) never silently terminates the hook
+#   - NO pipefail: command-substitution pipelines like `state::read | awk ...`
+#     intentionally tolerate the rc=3 lock-timeout from state::read, so we treat
+#     "no data" as the result rather than aborting
+set -u
 
-# Always exit 0 — Claude must never see a failed hook.
-trap 'exit 0' ERR EXIT
+# Final safety net: any uncaught failure still exits 0 so Claude never sees us
+# fail. We also catch EXIT to log if debug is on. This trap is the LAST line
+# of defense — every meaningful failure path above logs explicitly first.
+_hook_on_exit() {
+  local rc=$?
+  if [ "$rc" -ne 0 ] && declare -F hook_log >/dev/null 2>&1; then
+    hook_log "EXIT rc=$rc — uncaught error path"
+  fi
+  exit 0
+}
+trap _hook_on_exit EXIT
 
 # ---- self-locate, source libs ----------------------------------------------
 PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -98,8 +114,13 @@ cwd="$(jsonpb::peek "$payload" 'cwd')"
 tpath="$(jsonpb::peek "$payload" 'transcript_path')"
 
 # Look up current state for transition. Empty if untracked.
+#
+# state::read returns rc=3 on lock-timeout; we DO NOT use pipefail here so the
+# command-substitution always assigns "" rather than killing the hook. An empty
+# $current_row simply means "we don't know the prior state" — the transition
+# function handles that as "untracked".
 current_state=""
-current_row="$(state::read | awk -F'\t' -v p="$pane_id" '$1 == p { print; exit }')"
+current_row="$(state::read 2>/dev/null | awk -F'\t' -v p="$pane_id" '$1 == p { print; exit }')"
 if [ -n "$current_row" ]; then
   current_state="$(printf '%s' "$current_row" | awk -F'\t' '{print $3}')"
 fi
@@ -119,14 +140,13 @@ elif [ -n "$new_state" ]; then
   if [ -n "$cwd" ]; then
     local_project="$(detect::pane_project "$cwd")"
   fi
+  # TSV data rows: 1=pane_id, 2=kind, 3=status, 4=since, 5=pid, 6=project, 7=transcript_path
   if [ -z "$local_project" ] && [ -n "$current_row" ]; then
-    local_project="$(printf '%s' "$current_row" | awk -F'\t' '{print $7}')"
+    local_project="$(printf '%s' "$current_row" | awk -F'\t' '{print $6}')"
   fi
-  # Transcript path: prefer payload, else carry forward.
   if [ -z "$tpath" ] && [ -n "$current_row" ]; then
-    tpath="$(printf '%s' "$current_row" | awk -F'\t' '{print $8}')"
+    tpath="$(printf '%s' "$current_row" | awk -F'\t' '{print $7}')"
   fi
-  # Session pid: prefer payload, else carry forward.
   if [ -z "$session_pid" ] && [ -n "$current_row" ]; then
     session_pid="$(printf '%s' "$current_row" | awk -F'\t' '{print $5}')"
   fi

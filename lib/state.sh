@@ -241,11 +241,24 @@ state::list_by_status() {
 # Usage:
 #   pgrep claude | state::gc        # drop any tracked pane whose claude is dead
 #
-# If stdin is empty / not a pipe, all rows are considered dead (use carefully).
+# Safety: if stdin yields zero alive pids, GC is a no-op (returns 0). This
+# protects against the common case where `pgrep` finds nothing and would
+# otherwise nuke every tracked row. Callers that genuinely want a wipe should
+# use state::remove explicitly per pane.
 state::gc() {
   local alive_pids=""
   if [ ! -t 0 ]; then
     alive_pids="$(cat)"
+  fi
+  # No alive pids known → refuse to GC. This is the empty-input safety net.
+  case "$alive_pids" in
+    ''|$'\n'|*[!0-9$'\n']*)
+      # Strip non-numeric noise; if nothing useful remains, no-op.
+      alive_pids="$(printf '%s\n' "$alive_pids" | awk 'NF && /^[0-9]+$/')"
+      ;;
+  esac
+  if [ -z "$alive_pids" ]; then
+    return 0
   fi
   _state_with_lock -x _state_do_gc "$alive_pids"
 }

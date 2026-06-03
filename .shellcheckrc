@@ -13,3 +13,12 @@ disable=SC1091
 # Convention in our codebase favors `local x="$(cmd)"` for terseness when the
 # return value of `cmd` is not load-bearing for `$?`. Acknowledged tradeoff.
 disable=SC2155
+
+# SC2148: shebang missing.
+# lib/*.sh files are intentionally headerless — they are sourced, never run.
+disable=SC2148
+
+# SC2317: unreachable command.
+# Trap handlers (e.g. `trap _hook_on_exit EXIT`) trip this; the body of the
+# handler runs at exit, not inline.
+disable=SC2317

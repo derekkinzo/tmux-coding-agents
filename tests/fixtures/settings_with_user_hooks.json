@@ -1,0 +1,30 @@
+{
+  "awsCredentialExport": "/path/to/creds",
+  "permissions": {
+    "allow": ["Read", "Bash(ls *)"]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/my-other-tool stop-handler",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/local/bin/another-tool notify"
+          }
+        ]
+      }
+    ]
+  }
+}

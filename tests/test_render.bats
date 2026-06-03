@@ -101,3 +101,20 @@ setup() {
   # Should contain ellipsis when truncated
   assert_output --partial "…"
 }
+
+@test "render::utf8_truncate_bytes max=0 returns empty (no cut error)" {
+  run render::utf8_truncate_bytes "abc" 0
+  assert_success
+  assert_output ""
+}
+
+@test "render::status with template substitutes {NEED}/{WORK}" {
+  run render::status 3 5 'INBOX:{NEED}/{WORK}'
+  assert_output --partial "INBOX:3/5"
+}
+
+@test "render::status with template emits even when both counts are 0" {
+  run render::status 0 0 'idle:{NEED}'
+  # Built-in path is empty when both 0; template path overrides.
+  assert_output "idle:0"
+}

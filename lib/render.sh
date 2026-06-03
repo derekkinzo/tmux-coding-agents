@@ -76,6 +76,10 @@ render::utf8_truncate_bytes() {
       return 0
       ;;
   esac
+  # Edge: zero-byte truncation is valid and yields empty string.
+  if [ "$max_bytes" -eq 0 ]; then
+    return 0
+  fi
   if [ "${#s}" -le "$max_bytes" ]; then
     # ${#s} returns byte count under LC_ALL=C; under UTF-8 locale it
     # returns codepoint count. We force LC_ALL=C below for a deterministic
@@ -92,12 +96,21 @@ render::utf8_truncate_bytes() {
     last_byte=$(LC_ALL=C printf '%s' "${out: -1}" | LC_ALL=C od -An -tx1 | tr -d ' \n')
     case "$last_byte" in
       [89ab]?)
-        # Continuation byte; drop and continue.
+        # Continuation byte; drop and continue. Stop at length 1 so cut -b 1-0
+        # doesn't fire (invalid range on some cut implementations).
+        if [ "${#out}" -le 1 ]; then
+          out=""
+          break
+        fi
         out=$(LC_ALL=C printf '%s' "$out" | LC_ALL=C cut -b "1-$((${#out} - 1))")
         ;;
       [cdef]?)
         # Lead byte at the very end → started a multibyte but no continuations
         # made it through the cut. Drop the lead byte too.
+        if [ "${#out}" -le 1 ]; then
+          out=""
+          break
+        fi
         out=$(LC_ALL=C printf '%s' "$out" | LC_ALL=C cut -b "1-$((${#out} - 1))")
         break
         ;;
@@ -111,13 +124,30 @@ render::utf8_truncate_bytes() {
 
 # --- status segment ---------------------------------------------------------
 #
-# Inputs:  $1 = waiting count, $2 = working count
+# Inputs:  $1 = waiting count, $2 = working count, $3 (optional) = template
 # Output:  empty string when both are 0; else a tmux-format-ready segment with
 #          embedded #[fg=...] markup. Caller wraps in #[default] if needed.
+#
+# Template substitution: when $3 is non-empty, substitutes literal `{NEED}`
+# and `{WORK}` placeholders with the counts and emits the template even when
+# both counts are zero. Used by bin/inbox-status when @inbox-status-format
+# is set. The template is passed through render::scrub_ansi by the caller —
+# render::status does no further sanitization (treat $3 as trusted markup).
 render::status() {
-  local waiting="${1:-0}" working="${2:-0}"
+  local waiting="${1:-0}" working="${2:-0}" template="${3:-}"
   case "$waiting" in *[!0-9]* | '') waiting=0 ;; esac
   case "$working" in *[!0-9]* | '') working=0 ;; esac
+
+  if [ -n "$template" ]; then
+    # User-defined template overrides the built-in segment. Substitute
+    # placeholders. Leave the rest of the template untouched.
+    local out="$template"
+    out="${out//\{NEED\}/$waiting}"
+    out="${out//\{WORK\}/$working}"
+    printf '%s' "$out"
+    return 0
+  fi
+
   if [ "$waiting" -eq 0 ] && [ "$working" -eq 0 ]; then
     return 0
   fi
@@ -156,12 +186,15 @@ render::row() {
   esac
   local age
   age="$(render::ago "$age_secs")"
-  local proj_clean
-  proj_clean="$(printf '%s' "$project" | render::scrub_ansi | render::tmux_escape)"
-  # UTF-8-safe truncate to 21 bytes plus a 3-byte ellipsis if truncated.
-  if [ "${#proj_clean}" -gt 22 ]; then
-    proj_clean="$(render::utf8_truncate_bytes "$proj_clean" 21)…"
+  # Truncate the RAW project name first (visible-byte count), then escape `#`.
+  # If we truncated against the post-escape length, projects with `#` chars
+  # would show up shorter visually because the escape doubles each `#`.
+  local proj_raw proj_clean
+  proj_raw="$(printf '%s' "$project" | render::scrub_ansi)"
+  if [ "${#proj_raw}" -gt 22 ]; then
+    proj_raw="$(render::utf8_truncate_bytes "$proj_raw" 21)…"
   fi
+  proj_clean="$(printf '%s' "$proj_raw" | render::tmux_escape)"
   printf '#[fg=%s]%s#[default]  %-22s  %3s' \
     "$color" "$icon" "$proj_clean" "$age"
 }

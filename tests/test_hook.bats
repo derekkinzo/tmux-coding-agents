@@ -122,6 +122,47 @@ run_hook() {
   assert_equal "$proj_after" "$proj_before"
 }
 
+@test "hook rejects malformed TMUX_PANE (RCE-defense regression)" {
+  # TMUX_PANE controls the pane_id column. Without strict validation a hostile
+  # value like "%1'; touch /tmp/RCE; echo '" would be stored as a row whose
+  # pane_id contained shell metachars — which then RCE'd through inbox-pick.
+  run bash -c "cat '$FIXTURES/hook_user_prompt.json' | TMUX_PANE='%1; touch /tmp/RCE-NOPE-1; echo' '$BIN/hook' UserPromptSubmit"
+  assert_success # hook ALWAYS exits 0
+  source "$LIB/state.sh"
+  if [ -f "$(state::tsv_path)" ]; then
+    rows=$(awk 'NR>1' "$(state::tsv_path)" | wc -l | tr -d ' ')
+  else
+    rows=0
+  fi
+  # No row should have been written for the malformed pane_id.
+  assert_equal "$rows" "0"
+  [ ! -e /tmp/RCE-NOPE-1 ]
+}
+
+@test "hook drops payload at JSON-depth>8 (DESIGN §15 rule #2)" {
+  # Build a 12-deep nested object. jq depth count starts at 0 (root), so 12
+  # levels makes max(paths|length) = 12 > 8 → drop.
+  deep=$(printf '{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":1}}}}}}}}}}}}')
+  run bash -c "printf '%s' '$deep' | TMUX_PANE='%17' '$BIN/hook' UserPromptSubmit"
+  assert_success
+  source "$LIB/state.sh"
+  rows=0
+  if [ -f "$(state::tsv_path)" ]; then
+    rows=$(awk 'NR>1' "$(state::tsv_path)" | wc -l | tr -d ' ')
+  fi
+  assert_equal "$rows" "0"
+}
+
+@test "hook honors TMUX_CODING_AGENTS_DRY_RUN=1 (no state mutation)" {
+  TMUX_CODING_AGENTS_DRY_RUN=1 run_hook UserPromptSubmit hook_user_prompt.json
+  source "$LIB/state.sh"
+  rows=0
+  if [ -f "$(state::tsv_path)" ]; then
+    rows=$(awk 'NR>1' "$(state::tsv_path)" | wc -l | tr -d ' ')
+  fi
+  assert_equal "$rows" "0"
+}
+
 @test "hook TSV column positions are correct (regression: was off-by-one)" {
   # Data row: 1=pane_id, 2=kind, 3=status, 4=since, 5=pid, 6=project, 7=tpath.
   # If the off-by-one returns, $6 would be the pid (numeric) and $7 would be

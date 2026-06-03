@@ -11,6 +11,18 @@
 #   - normalizes legacy "nested-object" hook shapes (e.g. .hooks.PreToolUse
 #     when authored as {"Bash":[...]} ) into the array shape Claude expects
 #   - hook command properly quotes HOOK_BIN to handle paths with spaces
+#   - if the settings path is a SYMLINK, mutates the inode in-place (overwrite
+#     via cat instead of mv) so dotfiles workflows are preserved
+#
+# Configuration:
+#   CLAUDE_SETTINGS      - override the settings.json path (default:
+#                          $HOME/.claude/settings.json)
+#
+# Multiple Claude config files (Claude Code reads several) — install once per
+# file you want hooks in:
+#   $HOME/.claude/settings.json                 (user, default target)
+#   $HOME/.claude/settings.local.json           (user, local overrides)
+#   <repo>/.claude/settings.json                (project)
 #
 # Requires: jq.
 
@@ -20,9 +32,28 @@ PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOOK_BIN="$PLUGIN_ROOT/bin/hook"
 SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 
+# Hook events we wire. MUST stay in sync with DESIGN §5.1 / §6.2 and
+# lib/transitions.sh's case statement.
+EVENTS='UserPromptSubmit PreToolUse PostToolUse Notification Stop SessionEnd'
+
+# Trap state — initialize BEFORE the trap registration so a failure between
+# trap and assignment doesn't crash the cleanup itself.
+tmp=""
+lock_held=0
+
 err() {
   printf 'install-hooks: %s\n' "$*" >&2
 }
+
+cleanup() {
+  if [ "$lock_held" -eq 1 ]; then
+    flock -u 200 2>/dev/null || true
+  fi
+  if [ -n "${tmp:-}" ]; then
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
 
 if ! command -v jq >/dev/null 2>&1; then
   err "jq is required (https://stedolan.github.io/jq/)"
@@ -34,49 +65,60 @@ if [ ! -x "$HOOK_BIN" ]; then
   exit 1
 fi
 
-# Ensure parent dir + settings.json exist.
+# Resolve the settings path. If it's a symlink, operate on the resolved target
+# so dotfile-managed configs (e.g., ~/.claude/settings.json -> ~/dotfiles/...)
+# continue to work — we'll keep the inode by writing through cat at the end.
 mkdir -p "$(dirname "$SETTINGS")"
-if [ ! -f "$SETTINGS" ]; then
+if [ ! -e "$SETTINGS" ]; then
   printf '{}\n' >"$SETTINGS"
 fi
 
-# Acquire an exclusive lock on the settings file via a sidecar lock file
-# (we don't lock the settings file itself, since we'll be replacing the inode).
-lock="$SETTINGS.lock"
-exec 200>>"$lock"
+# settings_target: the path we read/write. Same as $SETTINGS if not a symlink.
+# preserve_symlink=1 means the final write must keep the inode (use cat, not mv).
+preserve_symlink=0
+settings_target="$SETTINGS"
+if [ -L "$SETTINGS" ]; then
+  preserve_symlink=1
+  resolved="$(readlink -f "$SETTINGS" 2>/dev/null || readlink "$SETTINGS")"
+  if [ -n "$resolved" ] && [ -f "$resolved" ]; then
+    settings_target="$resolved"
+  fi
+fi
+
+# Acquire an exclusive lock on a sidecar lock file. If we can't write into the
+# settings dir (rare: read-only home), fall back to a process-shared advisory
+# lock under /tmp keyed by an absolute path hash.
+lock="$settings_target.lock"
+if ! { exec 200>>"$lock"; } 2>/dev/null; then
+  # Fallback: lock in $TMPDIR keyed by inode of the settings file.
+  ino="$(stat -c '%i' "$settings_target" 2>/dev/null || stat -f '%i' "$settings_target" 2>/dev/null || echo 0)"
+  lock="${TMPDIR:-/tmp}/tmux-coding-agents-install.${USER:-u}.${ino}.lock"
+  exec 200>>"$lock" || {
+    err "could not open lock file $lock"
+    exit 1
+  }
+fi
 if ! flock -w 5 -x 200; then
-  err "could not acquire lock on $lock within 5s"
+  err "could not acquire lock on $lock within 5s (another install/edit in flight?)"
   exit 1
 fi
-trap 'flock -u 200 2>/dev/null; rm -f "$tmp" 2>/dev/null' EXIT
+lock_held=1
 
 # Validate before mutation.
-if ! jq -e . "$SETTINGS" >/dev/null 2>&1; then
-  err "$SETTINGS is not valid JSON; refusing to modify"
+if ! jq -e . "$settings_target" >/dev/null 2>&1; then
+  err "$settings_target is not valid JSON; refusing to modify"
   exit 1
 fi
 
-# Backup with sub-second-collision-resistant suffix.
-backup="$SETTINGS.bak.$(date +%s).$$"
-# `cp -n` won't clobber if (extremely unlikely) collision — fall through if
-# already exists; the suffix already includes pid so this should never matter
-# in practice but is here for paranoia.
-cp -n "$SETTINGS" "$backup" 2>/dev/null || cp "$SETTINGS" "$backup"
-
-# Build the new settings.json:
-# 1. Normalize any legacy nested-object hook shape ({"PreToolUse":{"Bash":[...]}})
-#    into the modern array shape ([{matcher,hooks:[...]}]) so the reduce can
-#    operate uniformly.
-# 2. Filter out any existing hooks whose command references our HOOK_BIN
-#    (idempotent re-install).
-# 3. Add fresh entries for each hook event.
-events='SessionStart UserPromptSubmit PreToolUse PostToolUse Notification Stop SessionEnd'
+# Backup. Suffix includes seconds + PID; collision-resistant in practice.
+backup="$settings_target.bak.$(date +%s).$$"
+cp "$settings_target" "$backup"
 
 # tmpfile in the SAME directory so mv is atomic (no cross-fs rename).
-tmp="$(mktemp "$(dirname "$SETTINGS")/.settings.json.XXXXXX")"
-chmod --reference="$SETTINGS" "$tmp" 2>/dev/null || chmod 0600 "$tmp"
+tmp="$(mktemp "$(dirname "$settings_target")/.settings.json.XXXXXX")"
+chmod --reference="$settings_target" "$tmp" 2>/dev/null || chmod 0600 "$tmp"
 
-jq --arg hook "$HOOK_BIN" --arg events "$events" '
+jq --arg hook "$HOOK_BIN" --arg events "$EVENTS" '
   # Normalize a single event entry value to an array of {matcher, hooks}.
   # Accepts already-correct array, legacy nested object, and degenerates.
   def normalize_event_value(v):
@@ -84,7 +126,7 @@ jq --arg hook "$HOOK_BIN" --arg events "$events" '
     elif (v | type) == "array" then
       v | map(
         if (. | type) == "object" and (.hooks | type) == "array"
-          then {matcher: (.matcher // ""), hooks: .hooks}
+          then . + {matcher: (.matcher // "")}  # preserve sibling fields
         else empty
         end
       )
@@ -92,11 +134,7 @@ jq --arg hook "$HOOK_BIN" --arg events "$events" '
       # Legacy: {"matcher_or_tool_name": [hook_objs...]}
       v | to_entries | map({
         matcher: .key,
-        hooks: (
-          if (.value | type) == "array" then .value
-          else []
-          end
-        )
+        hooks: (if (.value | type) == "array" then .value else [] end)
       })
     else []
     end;
@@ -120,8 +158,7 @@ jq --arg hook "$HOOK_BIN" --arg events "$events" '
 
   def add_for_event(ev):
     # @sh emits a shell-quoted form of the string, handling spaces and embedded
-    # single-quotes correctly: a path like /tmp/with space/hook becomes
-    # '\''/tmp/with space/hook'\''.
+    # single-quotes correctly.
     .hooks[ev] += [{
         hooks: [{
           type: "command",
@@ -133,7 +170,7 @@ jq --arg hook "$HOOK_BIN" --arg events "$events" '
   .hooks = (.hooks // {})
   | reduce ($events | split(" ")[]) as $ev (.; remove_ours_from_event($ev))
   | reduce ($events | split(" ")[]) as $ev (.; add_for_event($ev))
-' "$SETTINGS" >"$tmp"
+' "$settings_target" >"$tmp"
 
 # Validate the result before swapping.
 if ! jq -e . "$tmp" >/dev/null 2>&1; then
@@ -141,15 +178,29 @@ if ! jq -e . "$tmp" >/dev/null 2>&1; then
   exit 1
 fi
 
-mv -f "$tmp" "$SETTINGS"
-trap 'flock -u 200 2>/dev/null' EXIT # tmp is gone; only release lock now
+# Final write. If the user's settings.json is a symlink, preserve the inode
+# (write through cat). Otherwise atomic mv.
+if [ "$preserve_symlink" = "1" ]; then
+  cat "$tmp" >"$settings_target"
+  rm -f "$tmp"
+  tmp=""
+else
+  mv -f "$tmp" "$settings_target"
+  tmp=""
+fi
 
 cat <<EOF
 tmux-coding-agents: hooks installed in $SETTINGS
                     backup at $backup
 
-Wired event handlers: $events
+Wired event handlers: $EVENTS
 Hook command: bash $HOOK_BIN <EventName>
 
 Existing Claude Code sessions will pick up the hooks on their next turn.
+
+Other Claude Code config files you may want to install hooks into:
+  - \$HOME/.claude/settings.local.json (per-user local overrides)
+  - <repo>/.claude/settings.json       (project)
+
+Use:  CLAUDE_SETTINGS=/path/to/other/settings.json $0
 EOF

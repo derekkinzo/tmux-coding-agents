@@ -46,6 +46,7 @@ gc_if_due() {
 }
 
 gc_if_due
+state::sweep_orphan_tmps
 
 # Single pass through state::read — halves lock overhead vs two state::count
 # calls. Lock-timeout / corrupt TSV → both counts default to 0 (segment empty).
@@ -60,7 +61,15 @@ working="${counts##*$'\t'}"
 case "$waiting" in *[!0-9]* | '') waiting=0 ;; esac
 case "$working" in *[!0-9]* | '') working=0 ;; esac
 
-# render::status emits empty when both are 0 — perfect for status-right
-# (segment disappears entirely in the steady idle state).
-render::status "$waiting" "$working"
+# Optional user-defined format. When @inbox-status-format is set, render::status
+# substitutes {NEED}/{WORK} placeholders and emits the template even when both
+# counts are 0 — letting users put a persistent badge in their status bar.
+fmt=""
+if command -v tmux >/dev/null 2>&1; then
+  fmt="$(tmux show-option -gqv '@inbox-status-format' 2>/dev/null || true)"
+fi
+
+# Pass output through render::scrub_ansi per DESIGN §9 step 5: defense against
+# any control bytes that might have slipped through.
+render::status "$waiting" "$working" "$fmt" | render::scrub_ansi
 exit 0

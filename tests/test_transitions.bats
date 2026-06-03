@@ -112,6 +112,38 @@ setup() {
   assert_output "waiting"
 }
 
+@test "Stop with trailing NBSP before ? still detected" {
+  # NBSP (U+00A0) trailing whitespace must be trimmed before the question test.
+  payload=$(printf '{"last_assistant_message":"What now?\xc2\xa0"}')
+  run transitions::next claude working Stop "$payload"
+  assert_output "waiting"
+}
+
+@test "Stop with ASCII semicolon NO LONGER recognized as question" {
+  # We dropped the Greek-question-mark glyph match because semicolon is too
+  # common in normal text/code. Genuine Greek interrogatives are rare; the
+  # tradeoff favors precision over recall (review wwbo2gfgl LOW).
+  payload='{"last_assistant_message":"Done; ready."}'
+  run transitions::next claude working Stop "$payload"
+  assert_output "idle"
+}
+
+@test "transitions::next works without tmux on PATH (graceful fallback)" {
+  # Stage a PATH that has coreutils but no tmux (the real failure mode is
+  # running the hook from a Claude process whose env inherited just enough
+  # to exec but not the user's tmux binary).
+  staged="${BATS_TEST_TMPDIR}/no-tmux-bin"
+  mkdir -p "$staged"
+  for util in head tail od cut wc jq awk tr sed cat printf bash sleep; do
+    if command -v "$util" >/dev/null 2>&1; then
+      ln -sf "$(command -v "$util")" "$staged/$util"
+    fi
+  done
+  # Question-detect defaults ON when tmux is unreachable.
+  PATH="$staged" run transitions::next claude working Stop '{"last_assistant_message":"What?"}'
+  assert_output "waiting"
+}
+
 @test "@inbox-question-detect=off skips heuristic" {
   # mock var name: MOCK_OPT_ + tr-mapped key (@inbox-question-detect → _inbox_question_detect)
   export MOCK_OPT__inbox_question_detect="off"

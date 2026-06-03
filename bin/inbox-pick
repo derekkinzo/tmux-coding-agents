@@ -57,7 +57,31 @@ if ! hooks_installed; then
 fi
 
 # Get current tracked panes (sorted: waiting > working > idle).
-rows="$(state::read 2>/dev/null || true)"
+#
+# SECURITY (review wwbo2gfgl CRITICAL): every row is filtered through a strict
+# `^%[0-9]+$` regex on the pane_id column. A row with a malformed pane_id is
+# dropped (and logged via debug if enabled) rather than processed, because the
+# pane_id is interpolated into tmux format strings further down. State.sh
+# already validates writes, so this is defense in depth against any future
+# regression that lets a bad value through.
+rows="$(state::read 2>/dev/null \
+  | awk -F'\t' '$1 ~ /^%[0-9]+$/' || true)"
+if [ -z "$rows" ]; then
+  tmux display-message "tmux-coding-agents: no Claude sessions tracked yet"
+  exit 0
+fi
+
+# Lazy GC of stale rows: drop entries whose pane no longer exists in any tmux
+# session. DESIGN §4 / §6.4 require this; it's the only way a long-lived
+# state.tsv stays bounded over weeks of tmux usage.
+live_pane_ids="$(tmux list-panes -as -F '#{pane_id}' 2>/dev/null \
+  | awk '/^%[0-9]+$/' | tr '\n' ' ')"
+if [ -n "$live_pane_ids" ]; then
+  rows="$(printf '%s\n' "$rows" \
+    | awk -F'\t' -v live=" $live_pane_ids" '
+        index(live, " " $1 " ") { print }
+      ')"
+fi
 if [ -z "$rows" ]; then
   tmux display-message "tmux-coding-agents: no Claude sessions tracked yet"
   exit 0
@@ -88,9 +112,17 @@ fi
 
 # Build a filter for choose-tree:  -f '#{||:#{==:#{pane_id},%17},#{==:#{pane_id},%18}}'
 # Compose iteratively to handle ≥1 panes safely.
+#
+# SECURITY: each pid is re-validated against the strict pattern before
+# interpolation into the tmux format string. Belt-and-suspenders with the
+# state::read filter above.
 filter=""
 while IFS= read -r pid; do
   [ -n "$pid" ] || continue
+  case "$pid" in
+    %[0-9] | %[0-9][0-9] | %[0-9][0-9][0-9] | %[0-9][0-9][0-9][0-9] | %[0-9][0-9][0-9][0-9][0-9]) : ;;
+    *) continue ;;
+  esac
   local_eq="#{==:#{pane_id},${pid}}"
   if [ -z "$filter" ]; then
     filter="$local_eq"
@@ -130,6 +162,11 @@ tmux show-options -g 2>/dev/null \
 now_epoch="$(date +%s)"
 while IFS=$'\t' read -r pane_id _kind status since_epoch _pid project _tpath; do
   [ -n "${pane_id:-}" ] || continue
+  # Strict re-validation. Same rationale as the filter-build loop above.
+  case "$pane_id" in
+    %[0-9] | %[0-9][0-9] | %[0-9][0-9][0-9] | %[0-9][0-9][0-9][0-9] | %[0-9][0-9][0-9][0-9][0-9]) : ;;
+    *) continue ;;
+  esac
   age=$((now_epoch - since_epoch))
   rendered="$(render::row "$status" "$project" "$age")"
   # Set as a per-pane user option (works on tmux 3.2+).
@@ -139,6 +176,11 @@ done <<<"$rows"
 # Use that per-pane option in the format string.
 fmt='#{?#{pane_in_mode},,}#{E:@inbox-row-#{pane_id}}'
 
-# Open the popup with choose-tree filtered to our panes.
+# SECURITY (review wwbo2gfgl CRITICAL): pass the choose-tree command as ARGV
+# (separate args), not as a single shell-parsed string. With the previous
+# string form, `tmux display-popup -E "tmux choose-tree -Zw -f '$filter' ..."`
+# spawned a child sh which re-parsed the string — a `'` inside $filter (e.g.,
+# from a malicious pane_id) closed the single-quote and ran arbitrary code.
+# argv form bypasses the inner shell entirely.
 exec tmux display-popup -E -h 70% -w 80% \
-  "tmux choose-tree -Zw -f '$filter' -F '$fmt'"
+  tmux choose-tree -Zw -f "$filter" -F "$fmt"

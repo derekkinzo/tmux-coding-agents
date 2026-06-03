@@ -39,8 +39,13 @@ jsonpb::peek() {
   printf '%s' "$payload" | jq -r --arg k "$key" '.[$k] // ""' 2>/dev/null
 }
 
-# Extract a one-level-nested value. $2 must be "outer.inner".
-# Returns "" if outer or inner is absent, or if dotted form is malformed.
+# Extract a nested scalar. $2 is a dotted path like "outer.inner" or
+# "a.b.c.d" — each segment is a literal object key. Returns "" if any segment
+# is absent / the leaf is null / the path traverses a non-object.
+#
+# We split the path into a JSON array of keys (split on '.') and feed it to
+# jq via getpath, which is depth-agnostic. The previous one-dot-only form
+# silently misinterpreted "a.b.c" as outer="a", inner="b.c".
 jsonpb::peek_nested() {
   local payload="${1:-}" dotted="${2:-}"
   [ -n "$payload" ] && [ -n "$dotted" ] || return 0
@@ -51,10 +56,12 @@ jsonpb::peek_nested() {
       return 0
       ;;
   esac
-  local outer="${dotted%%.*}"
-  local inner="${dotted#*.}"
   printf '%s' "$payload" \
-    | jq -r --arg o "$outer" --arg i "$inner" '(.[$o] // {}) | (.[$i] // "")' 2>/dev/null
+    | jq -r --arg p "$dotted" '
+        ($p | split(".")) as $keys
+        | (try getpath($keys) catch null) // ""
+        | (if . == null then "" else tostring end)
+      ' 2>/dev/null
 }
 
 # Length of a top-level array. Always prints a non-negative integer.

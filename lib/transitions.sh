@@ -18,9 +18,13 @@
 # This file is sourced. Depends on lib/jsonpb.sh.
 # No shebang. set -u clean.
 
-# Whether question-detection is enabled (read once from tmux option).
-# Falls back to "on" if tmux option unset.
+# Whether question-detection is enabled. Falls back to "on" if tmux option
+# unset OR tmux is not on PATH (the hook can run from a Claude environment
+# that inherits the tmux pane env but lacks the tmux binary).
 _transitions_question_detect_enabled() {
+  if ! command -v tmux >/dev/null 2>&1; then
+    return 0
+  fi
   local v
   v="$(tmux show-option -gqv '@inbox-question-detect' 2>/dev/null)"
   case "$v" in
@@ -55,13 +59,29 @@ _transitions_looks_like_question() {
   # Note: the ASCII semicolon false positive is documented and accepted —
   # cleaner than a locale-dependent test for the rare Greek interrogative.
 
-  # Trim trailing ASCII whitespace.
+  # Trim trailing whitespace — ASCII (space/tab/LF/CR), NBSP (U+00A0,
+  # 0xC2 0xA0), ZWSP/ZWJ/LTR/RTL marks (U+200B-200F: 0xE2 0x80 0x8B-0x8F).
+  # IMPORTANT: bash slicing is codepoint-aware under UTF-8 locale, so we use
+  # head -c byte-counted to perform the truncation. Cheap (<1ms per call).
+  local trim_hex msg_bytes
   while [ -n "$msg" ]; do
-    local last_byte
-    last_byte=$(LC_ALL=C printf '%s' "${msg: -1}" 2>/dev/null)
-    case "$last_byte" in
-      ' ' | $'\t' | $'\n' | $'\r')
-        msg=$(LC_ALL=C printf '%s' "$msg" | LC_ALL=C cut -c1-$((${#msg} - 1)))
+    trim_hex=$(LC_ALL=C printf '%s' "$msg" \
+      | LC_ALL=C tail -c 3 \
+      | LC_ALL=C od -An -tx1 \
+      | tr -d ' \n')
+    msg_bytes=$(LC_ALL=C printf '%s' "$msg" | LC_ALL=C wc -c)
+    case "$trim_hex" in
+      *20 | *09 | *0a | *0d)
+        # Drop 1 byte.
+        msg=$(LC_ALL=C printf '%s' "$msg" | LC_ALL=C head -c $((msg_bytes - 1)))
+        ;;
+      *c2a0)
+        # Drop 2 bytes (NBSP).
+        msg=$(LC_ALL=C printf '%s' "$msg" | LC_ALL=C head -c $((msg_bytes - 2)))
+        ;;
+      *e2808[bcdef])
+        # Drop 3 bytes (ZWSP / ZWJ / LTR / RTL marks).
+        msg=$(LC_ALL=C printf '%s' "$msg" | LC_ALL=C head -c $((msg_bytes - 3)))
         ;;
       *) break ;;
     esac
@@ -79,8 +99,10 @@ _transitions_looks_like_question() {
   case "$tail_hex" in
     *efbc9f) return 0 ;; # full-width ？
     *d89f) return 0 ;;   # Arabic ؟
-    *3f) return 0 ;;     # ASCII ?
-    *3b) return 0 ;;     # ASCII ; (accepted false positive)
+    *3f) return 0 ;;     # ASCII '?'
+      # ASCII ';' (0x3b) is intentionally NOT recognized: Greek U+037E shares
+      # the glyph but is rare enough that false positives on normal text
+      # outweigh true positives.
   esac
   return 1
 }

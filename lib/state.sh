@@ -36,10 +36,17 @@
 
 if [ -z "${STATE_TSV_VERSION:-}" ]; then
   readonly STATE_TSV_VERSION='#v1'
-  readonly STATE_LOCK_TIMEOUT_SECS='1' # integer for max BSD/util-linux compatibility
+  # 0.2s honors DESIGN §5.4/§7/§15. util-linux flock and BSD flock both accept
+  # fractional -w on every supported platform.
+  readonly STATE_LOCK_TIMEOUT_SECS='0.2'
 fi
 
 # Resolve cache dir; create if missing; refuse to use it if it's a symlink.
+# SECURITY (review wwbo2gfgl HIGH/MEDIUM):
+#   - if the path exists as a symlink → refuse (could redirect writes)
+#   - if it exists with permissive mode (group/other read/write/exec) → tighten
+#     to 0700. This handles upgrade paths where an older umask left it at 0755
+#     and protects against hostile log-file appends via symlinks placed inside.
 state::cache_dir() {
   local base="${XDG_CACHE_HOME:-$HOME/.cache}"
   local dir="$base/tmux-coding-agents"
@@ -47,8 +54,16 @@ state::cache_dir() {
     return 1
   fi
   if [ ! -d "$dir" ]; then
-    mkdir -p "$dir" 2>/dev/null || return 1
+    (umask 077 && mkdir -p "$dir") 2>/dev/null || return 1
     chmod 0700 "$dir" 2>/dev/null || true
+  else
+    # Tighten if currently more permissive than 0700.
+    local mode
+    mode="$(stat -c '%a' "$dir" 2>/dev/null || stat -f '%Lp' "$dir" 2>/dev/null || echo '')"
+    case "$mode" in
+      700) : ;;
+      *) chmod 0700 "$dir" 2>/dev/null || true ;;
+    esac
   fi
   printf '%s' "$dir"
 }
@@ -74,10 +89,19 @@ _state_ensure_header() {
   fi
 }
 
-# --- internal: validate field has no tab/newline/CR -------------------------
+# --- internal: validate field has no row-corrupting bytes -------------------
+# Rejects:
+#   - tab/newline/CR (would corrupt the TSV row directly)
+#   - any literal backslash (would be re-expanded by awk -v as \n/\t/\r/\\,
+#     allowing TSV row injection — see review wwbo2gfgl critical finding).
+#     Even though _state_do_upsert/remove now use ENVIRON instead of -v,
+#     refusing backslash at validation is defense in depth and gives a clear
+#     contract: project names and transcript paths must be backslash-free
+#     (which is true for every realistic value Claude produces).
 _state_validate_field() {
   case "$1" in
     *$'\t'* | *$'\n'* | *$'\r'*) return 1 ;;
+    *\\*) return 1 ;;
   esac
   return 0
 }
@@ -120,10 +144,26 @@ _state_with_lock() {
     eval "exec ${lock_fd}>>\"\$lock\"" || return 1
   fi
 
-  if ! flock -w "$STATE_LOCK_TIMEOUT_SECS" "$mode" "$lock_fd"; then
-    eval "exec ${lock_fd}>&-"
-    return 3
-  fi
+  # Try to acquire the lock. The timeout is short (200ms) per DESIGN §5.4
+  # to avoid blocking Claude/tmux for any user-perceptible amount of time;
+  # a couple of -n retries with short sleeps absorb the burst when many
+  # writers hit at once.
+  local attempts=0
+  while ! flock -w "$STATE_LOCK_TIMEOUT_SECS" "$mode" "$lock_fd"; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -ge 3 ]; then
+      eval "exec ${lock_fd}>&-"
+      return 3
+    fi
+    # Brief jittered backoff between retries; uses bash $RANDOM modulo
+    # rather than sleep fractions for portability across BSD sleep.
+    case "$((RANDOM % 4))" in
+      0) sleep 0.05 ;;
+      1) sleep 0.1 ;;
+      2) sleep 0.15 ;;
+      3) sleep 0.2 ;;
+    esac
+  done
 
   "$cb" "$lock_fd" "$@"
   local rc=$?
@@ -154,7 +194,16 @@ _state_do_upsert() {
 
   local tsv tmp
   tsv="$(state::tsv_path)" || return 1
+  # SECURITY: refuse to write through a symlink. Without this, an attacker who
+  # can place a symlink at $XDG_CACHE_HOME/tmux-coding-agents/state.tsv can
+  # cause our writes to land in arbitrary files (review wwbo2gfgl HIGH).
+  if [ -L "$tsv" ]; then
+    return 1
+  fi
   tmp="$(_state_tmpfile_for "$tsv")"
+  # SIGTERM cleanup. SIGKILL is uncatchable — see _state_sweep_orphan_tmps.
+  # shellcheck disable=SC2064  # we want $tmp expanded NOW, not at trap time
+  trap "rm -f '$tmp' 2>/dev/null" RETURN
 
   _state_ensure_header "$tsv"
 
@@ -162,20 +211,21 @@ _state_do_upsert() {
   printf -v new_row '%s\t%s\t%s\t%s\t%s\t%s\t%s' \
     "$pane_id" "$kind" "$status" "$since" "$pid" "$project" "$tpath"
 
-  awk -F'\t' -v pid_target="$pane_id" -v new="$new_row" '
-    NR == 1 { print; next }
-    $1 == pid_target { found = 1; print new; next }
-    { print }
-    END { if (!found) print new }
-  ' "$tsv" >"$tmp" || {
-    rm -f "$tmp" 2>/dev/null
-    return 1
-  }
+  # SECURITY: pass values via ENVIRON (no escape expansion) rather than -v
+  # (which performs C-style escape expansion on its values, allowing a
+  # backslash-n in the input to become a real newline and inject TSV rows).
+  # Validation in _state_validate_field already rejects backslash, so this is
+  # defense in depth.
+  STATE_PID_TARGET="$pane_id" STATE_NEW_ROW="$new_row" \
+    awk -F'\t' '
+      BEGIN { pid_target = ENVIRON["STATE_PID_TARGET"]; new = ENVIRON["STATE_NEW_ROW"] }
+      NR == 1 { print; next }
+      $1 == pid_target { found = 1; print new; next }
+      { print }
+      END { if (!found) print new }
+    ' "$tsv" >"$tmp" || return 1
 
-  mv -f "$tmp" "$tsv" || {
-    rm -f "$tmp" 2>/dev/null
-    return 1
-  }
+  mv -f "$tmp" "$tsv" || return 1
   return 0
 }
 
@@ -193,22 +243,23 @@ _state_do_remove() {
 
   local tsv tmp
   tsv="$(state::tsv_path)" || return 1
+  if [ -L "$tsv" ]; then
+    return 1
+  fi
   [ -f "$tsv" ] || return 0
   tmp="$(_state_tmpfile_for "$tsv")"
+  # shellcheck disable=SC2064
+  trap "rm -f '$tmp' 2>/dev/null" RETURN
 
-  awk -F'\t' -v pid_target="$pane_id" '
-    NR == 1 { print; next }
-    $1 == pid_target { next }
-    { print }
-  ' "$tsv" >"$tmp" || {
-    rm -f "$tmp" 2>/dev/null
-    return 1
-  }
+  STATE_PID_TARGET="$pane_id" \
+    awk -F'\t' '
+      BEGIN { pid_target = ENVIRON["STATE_PID_TARGET"] }
+      NR == 1 { print; next }
+      $1 == pid_target { next }
+      { print }
+    ' "$tsv" >"$tmp" || return 1
 
-  mv -f "$tmp" "$tsv" || {
-    rm -f "$tmp" 2>/dev/null
-    return 1
-  }
+  mv -f "$tmp" "$tsv" || return 1
   return 0
 }
 
@@ -243,6 +294,19 @@ state::count() {
 state::list_by_status() {
   local target="$1"
   state::read | awk -F'\t' -v t="$target" '$3 == t' | sort -t$'\t' -k4,4nr
+}
+
+# --- orphan tmpfile sweep ---------------------------------------------------
+# A SIGKILL between awk-write and mv-rename leaves behind state.tsv.tmp.* files.
+# Sweep any older than 60 seconds (stale, no in-flight writer should still hold
+# them). Cheap; called opportunistically by bin/inbox-status.
+state::sweep_orphan_tmps() {
+  local dir
+  dir="$(state::cache_dir)" 2>/dev/null || return 0
+  # Only consider files matching our tmpfile pattern. Use find with -mmin so
+  # we don't risk deleting an in-flight writer's tmpfile.
+  find "$dir" -maxdepth 1 -type f -name 'state.tsv.tmp.*' -mmin +1 \
+    -delete 2>/dev/null || true
 }
 
 # --- gc ---------------------------------------------------------------------
@@ -282,29 +346,31 @@ _state_do_gc() {
 
   local tsv tmp
   tsv="$(state::tsv_path)" || return 1
+  if [ -L "$tsv" ]; then
+    return 1
+  fi
   [ -f "$tsv" ] || return 0
   tmp="$(_state_tmpfile_for "$tsv")"
+  # shellcheck disable=SC2064
+  trap "rm -f '$tmp' 2>/dev/null" RETURN
 
-  # Pass alive_pids to awk via env to keep values out of script source.
-  awk -F'\t' -v alive="$alive_pids" '
-    BEGIN {
-      n = split(alive, parts, "\n")
-      for (i = 1; i <= n; i++) if (parts[i] != "") alive_set[parts[i]] = 1
-    }
-    NR == 1 { print; next }
-    {
-      pid = $5
-      if (pid == "" || pid == "0") next
-      if (pid in alive_set) print
-    }
-  ' "$tsv" >"$tmp" || {
-    rm -f "$tmp" 2>/dev/null
-    return 1
-  }
+  # alive_pids is a newline-separated PID list, validated as numeric-only by
+  # state::gc before we got here. Pass via ENVIRON to avoid awk -v escape
+  # expansion (defense in depth).
+  STATE_ALIVE_PIDS="$alive_pids" \
+    awk -F'\t' '
+      BEGIN {
+        n = split(ENVIRON["STATE_ALIVE_PIDS"], parts, "\n")
+        for (i = 1; i <= n; i++) if (parts[i] != "") alive_set[parts[i]] = 1
+      }
+      NR == 1 { print; next }
+      {
+        pid = $5
+        if (pid == "" || pid == "0") next
+        if (pid in alive_set) print
+      }
+    ' "$tsv" >"$tmp" || return 1
 
-  mv -f "$tmp" "$tsv" || {
-    rm -f "$tmp" 2>/dev/null
-    return 1
-  }
+  mv -f "$tmp" "$tsv" || return 1
   return 0
 }

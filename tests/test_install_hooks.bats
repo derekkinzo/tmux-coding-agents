@@ -20,13 +20,16 @@ teardown() {
   jq -e . "$CLAUDE_SETTINGS" >/dev/null
 }
 
-@test "install-hooks wires all 7 events" {
+@test "install-hooks wires all 6 events (no SessionStart per DESIGN §5.1)" {
   cp "$FIXTURES/settings_empty.json" "$CLAUDE_SETTINGS"
   "$BIN/install-hooks" >/dev/null
-  for ev in SessionStart UserPromptSubmit PreToolUse PostToolUse Notification Stop SessionEnd; do
+  for ev in UserPromptSubmit PreToolUse PostToolUse Notification Stop SessionEnd; do
     n=$(jq --arg e "$ev" '.hooks[$e] | length' "$CLAUDE_SETTINGS")
     [ "$n" -ge 1 ]
   done
+  # SessionStart should NOT be wired (we don't transition on it).
+  n=$(jq '.hooks.SessionStart // [] | length' "$CLAUDE_SETTINGS")
+  [ "$n" = "0" ]
 }
 
 @test "install-hooks is idempotent (re-run does not duplicate)" {
@@ -139,10 +142,42 @@ EOF
   done
   wait
 
-  # JSON must still parse and have exactly 7 hooks (one per event).
+  # JSON must still parse and have exactly 6 hooks (one per event).
   jq -e . "$CLAUDE_SETTINGS" >/dev/null
   n=$(jq '[.hooks[] | length] | add' "$CLAUDE_SETTINGS")
-  assert_equal "$n" "7"
+  assert_equal "$n" "6"
+}
+
+@test "install-hooks preserves dotfiles symlink (write through cat, not mv)" {
+  # User's actual settings live in dotfiles repo and are symlinked into ~/.claude.
+  real_target="${BATS_TEST_TMPDIR}/dotfiles/settings.json"
+  mkdir -p "$(dirname "$real_target")"
+  cp "$FIXTURES/settings_with_user_hooks.json" "$real_target"
+  rm -f "$CLAUDE_SETTINGS"
+  ln -s "$real_target" "$CLAUDE_SETTINGS"
+  inode_before=$(stat -c %i "$CLAUDE_SETTINGS" 2>/dev/null || stat -f %i "$CLAUDE_SETTINGS")
+  "$BIN/install-hooks" >/dev/null
+  # Symlink must still be a symlink (not replaced by a regular file).
+  [ -L "$CLAUDE_SETTINGS" ]
+  inode_after=$(stat -c %i "$CLAUDE_SETTINGS" 2>/dev/null || stat -f %i "$CLAUDE_SETTINGS")
+  assert_equal "$inode_after" "$inode_before"
+  # Real target now contains our hook entries.
+  ours=$(jq -r '[.hooks[]?[]?.hooks[]?.command] | join(" ")' "$real_target" \
+    | grep -c 'tmux-coding-agents/bin/hook' || true)
+  [ "$ours" -ge 1 ]
+}
+
+@test "uninstall-hooks --restore replaces from most recent .bak" {
+  cp "$FIXTURES/settings_with_user_hooks.json" "$CLAUDE_SETTINGS"
+  pre_hash=$(jq -S -c . "$CLAUDE_SETTINGS")
+  "$BIN/install-hooks" >/dev/null
+  # Modify settings further to ensure restore actually changes content.
+  jq '.somethingElse = "added"' "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.new"
+  mv "$CLAUDE_SETTINGS.new" "$CLAUDE_SETTINGS"
+  run "$BIN/uninstall-hooks" --restore
+  assert_success
+  post_hash=$(jq -S -c . "$CLAUDE_SETTINGS")
+  assert_equal "$post_hash" "$pre_hash"
 }
 
 @test "uninstall-hooks: nothing-to-do path (no backup, no churn)" {

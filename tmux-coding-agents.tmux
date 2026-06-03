@@ -47,32 +47,39 @@ if [ "$ver_major" -lt 3 ] || { [ "$ver_major" -eq 3 ] && [ "$ver_minor" -lt 2 ];
 fi
 
 # ---- 2. set option defaults (only if unset) --------------------------------
-# Helper: set option only if currently empty.
+#
+# Distinguish "not set" from "set to empty". `tmux show-option -gqv` returns
+# empty for both, so we check the option's PRESENCE first using `show-options
+# -g | grep`. If the user explicitly sets `@inbox-pick-key ''` they want NO
+# binding (opt-out); we honor that.
+tca_option_is_set() {
+  local opt="$1"
+  tmux show-options -g 2>/dev/null | awk -v o="$opt" '$1 == o { found = 1 } END { exit !found }'
+}
+
 tca_default_opt() {
   local opt="$1" default="$2"
-  local cur
-  cur="$(tmux show-option -gqv "$opt" 2>/dev/null)"
-  if [ -z "$cur" ]; then
+  if ! tca_option_is_set "$opt"; then
     tmux set-option -gq "$opt" "$default"
   fi
 }
 
 tca_default_opt "@inbox-pick-key" "a"
-tca_default_opt "@inbox-next-key" "" # empty = unbound (opt-in)
+# @inbox-next-key intentionally NO default — empty = unbound (opt-in feature).
 tca_default_opt "@inbox-question-detect" "on"
 tca_default_opt "@inbox-debug" "off"
 # @inbox-status-format intentionally has no default — empty triggers built-in.
 
 # ---- 3. bind keys ----------------------------------------------------------
-# Pick key: always bound. Use tmux's native `-N` for help-text.
-pick_key="$(tmux show-option -gqv '@inbox-pick-key')"
-[ -n "$pick_key" ] || pick_key='a'
-
-tmux bind-key -N "Open Claude inbox picker" "$pick_key" \
-  run-shell "$PLUGIN_ROOT/bin/inbox-pick"
+# Pick key: bound only if set + non-empty. User who wants to disable: `set -g @inbox-pick-key ''`.
+pick_key="$(tmux show-option -gqv '@inbox-pick-key' 2>/dev/null)"
+if [ -n "$pick_key" ]; then
+  tmux bind-key -N "Open Claude inbox picker" "$pick_key" \
+    run-shell "$PLUGIN_ROOT/bin/inbox-pick"
+fi
 
 # Next key: opt-in only. Empty value = no binding.
-next_key="$(tmux show-option -gqv '@inbox-next-key')"
+next_key="$(tmux show-option -gqv '@inbox-next-key' 2>/dev/null)"
 if [ -n "$next_key" ]; then
   tmux bind-key -N "Jump to next waiting Claude pane" "$next_key" \
     run-shell "$PLUGIN_ROOT/bin/inbox-next"

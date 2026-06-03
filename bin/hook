@@ -69,6 +69,12 @@ hook_log() {
   local cache_dir
   cache_dir="$(state::cache_dir)" || return 0
   local logfile="$cache_dir/log"
+  # SECURITY: refuse to follow a symlink at the log path. Combined with the
+  # 0700 cache_dir, this stops an attacker who can plant a symlink (e.g., to
+  # ~/.bashrc) from having log lines appended to arbitrary files.
+  if [ -L "$logfile" ]; then
+    return 0
+  fi
   local ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
   printf '%s\t%s\n' "$ts" "$*" >>"$logfile" 2>/dev/null || true
@@ -85,9 +91,13 @@ jsonpb::require_jq 2>/dev/null || {
 }
 
 # Read at most 64 KiB from stdin.
+#
+# We compare BYTES (LC_ALL=C with awk) — under a UTF-8 locale, bash's ${#var}
+# counts codepoints, which would let multi-byte payloads slip past the limit.
 payload="$(head -c 65537)"
-if [ "${#payload}" -gt 65536 ]; then
-  hook_log "DROP payload>64KiB event=$event"
+payload_bytes="$(LC_ALL=C printf '%s' "$payload" | wc -c | tr -d ' ')"
+if [ "${payload_bytes:-0}" -gt 65536 ]; then
+  hook_log "DROP payload>64KiB event=$event bytes=$payload_bytes"
   exit 0
 fi
 [ -z "$payload" ] && payload='{}'
@@ -98,12 +108,35 @@ if ! printf '%s' "$payload" | jq -e . >/dev/null 2>&1; then
   exit 0
 fi
 
+# JSON depth cap (DESIGN §15 rule #2): refuse payloads nested beyond 8 levels.
+# Computed via jq walking the tree; cheap on payloads that already passed
+# parse validation. Reject silently to avoid feeding pathological payloads
+# any further into our pipeline.
+json_depth="$(printf '%s' "$payload" \
+  | jq '[paths] | map(length) | (max // 0)' 2>/dev/null || echo 0)"
+case "$json_depth" in *[!0-9]* | '') json_depth=0 ;; esac
+if [ "$json_depth" -gt 8 ]; then
+  hook_log "DROP json_depth=$json_depth event=$event"
+  exit 0
+fi
+
 # Pane attribution. Without TMUX_PANE we cannot store anything.
+#
+# SECURITY: validate TMUX_PANE against the canonical tmux pane_id format
+# `^%[0-9]+$` before using it. Tmux always emits this exact form; an unusual
+# value indicates a hostile environment we should not trust.
 pane_id="${TMUX_PANE:-}"
 [ -n "$pane_id" ] || {
   hook_log "SKIP no TMUX_PANE event=$event"
   exit 0
 }
+case "$pane_id" in
+  %[0-9] | %[0-9][0-9] | %[0-9][0-9][0-9] | %[0-9][0-9][0-9][0-9] | %[0-9][0-9][0-9][0-9][0-9]) : ;;
+  *)
+    hook_log "DROP malformed TMUX_PANE='$pane_id' event=$event"
+    exit 0
+    ;;
+esac
 
 # Pull what we need from the payload.
 session_pid="$(jsonpb::peek "$payload" 'pid')"
@@ -132,8 +165,12 @@ now_epoch="$(date +%s)"
 
 # Apply.
 if [ "$event" = "SessionEnd" ]; then
-  state::remove "$pane_id" || true
-  hook_log "RM pane=$pane_id"
+  if [ -n "${TMUX_CODING_AGENTS_DRY_RUN:-}" ]; then
+    hook_log "DRY-RM pane=$pane_id"
+  else
+    state::remove "$pane_id" || true
+    hook_log "RM pane=$pane_id"
+  fi
 elif [ -n "$new_state" ]; then
   # Project name from cwd (or carry forward from existing row).
   local_project=""
@@ -154,10 +191,15 @@ elif [ -n "$new_state" ]; then
   local_project="$(printf '%s' "$local_project" | LC_ALL=C tr -d '\000-\037\177')"
   tpath="$(printf '%s' "$tpath" | LC_ALL=C tr -d '\000-\037\177')"
 
-  state::upsert \
-    "$pane_id" 'claude' "$new_state" "$now_epoch" \
-    "${session_pid:-0}" "$local_project" "$tpath" || true
-  hook_log "UP pane=$pane_id ${current_state:--} → $new_state event=$event"
+  if [ -n "${TMUX_CODING_AGENTS_DRY_RUN:-}" ]; then
+    # DESIGN §8: dry-run mode — log the would-be transition but don't mutate.
+    hook_log "DRY pane=$pane_id ${current_state:--} → $new_state event=$event"
+  else
+    state::upsert \
+      "$pane_id" 'claude' "$new_state" "$now_epoch" \
+      "${session_pid:-0}" "$local_project" "$tpath" || true
+    hook_log "UP pane=$pane_id ${current_state:--} → $new_state event=$event"
+  fi
 fi
 
 # Nudge tmux to repaint the status bar so the user sees state changes promptly,

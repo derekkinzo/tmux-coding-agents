@@ -36,7 +36,7 @@
 
 if [ -z "${STATE_TSV_VERSION:-}" ]; then
   readonly STATE_TSV_VERSION='#v1'
-  readonly STATE_LOCK_TIMEOUT_SECS='1'   # integer for max BSD/util-linux compatibility
+  readonly STATE_LOCK_TIMEOUT_SECS='1' # integer for max BSD/util-linux compatibility
 fi
 
 # Resolve cache dir; create if missing; refuse to use it if it's a symlink.
@@ -77,7 +77,7 @@ _state_ensure_header() {
 # --- internal: validate field has no tab/newline/CR -------------------------
 _state_validate_field() {
   case "$1" in
-    *$'\t'*|*$'\n'*|*$'\r'*) return 1 ;;
+    *$'\t'* | *$'\n'* | *$'\r'*) return 1 ;;
   esac
   return 0
 }
@@ -90,7 +90,7 @@ _state_tmpfile_for() {
   local nanos
   nanos=$(date +%N 2>/dev/null)
   case "$nanos" in
-    ''|*N*) nanos="$RANDOM" ;;
+    '' | *N*) nanos="$RANDOM" ;;
   esac
   printf '%s.tmp.%s.%s.%s' "$target" "$$" "$nanos" "${RANDOM:-0}"
 }
@@ -167,9 +167,15 @@ _state_do_upsert() {
     $1 == pid_target { found = 1; print new; next }
     { print }
     END { if (!found) print new }
-  ' "$tsv" >"$tmp" || { rm -f "$tmp" 2>/dev/null; return 1; }
+  ' "$tsv" >"$tmp" || {
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  }
 
-  mv -f "$tmp" "$tsv" || { rm -f "$tmp" 2>/dev/null; return 1; }
+  mv -f "$tmp" "$tsv" || {
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  }
   return 0
 }
 
@@ -194,9 +200,15 @@ _state_do_remove() {
     NR == 1 { print; next }
     $1 == pid_target { next }
     { print }
-  ' "$tsv" >"$tmp" || { rm -f "$tmp" 2>/dev/null; return 1; }
+  ' "$tsv" >"$tmp" || {
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  }
 
-  mv -f "$tmp" "$tsv" || { rm -f "$tmp" 2>/dev/null; return 1; }
+  mv -f "$tmp" "$tsv" || {
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  }
   return 0
 }
 
@@ -252,7 +264,7 @@ state::gc() {
   fi
   # No alive pids known → refuse to GC. This is the empty-input safety net.
   case "$alive_pids" in
-    ''|$'\n'|*[!0-9$'\n']*)
+    '' | $'\n' | *[!0-9$'\n']*)
       # Strip non-numeric noise; if nothing useful remains, no-op.
       alive_pids="$(printf '%s\n' "$alive_pids" | awk 'NF && /^[0-9]+$/')"
       ;;
@@ -285,8 +297,14 @@ _state_do_gc() {
       if (pid == "" || pid == "0") next
       if (pid in alive_set) print
     }
-  ' "$tsv" >"$tmp" || { rm -f "$tmp" 2>/dev/null; return 1; }
+  ' "$tsv" >"$tmp" || {
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  }
 
-  mv -f "$tmp" "$tsv" || { rm -f "$tmp" 2>/dev/null; return 1; }
+  mv -f "$tmp" "$tsv" || {
+    rm -f "$tmp" 2>/dev/null
+    return 1
+  }
   return 0
 }

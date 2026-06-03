@@ -69,7 +69,7 @@ jsonpb::array_len() {
   n=$(printf '%s' "$payload" \
     | jq -r --arg k "$key" '.[$k] | if type == "array" then length else 0 end' 2>/dev/null)
   case "$n" in
-    ''|*[!0-9]*) printf '0' ;;
+    '' | *[!0-9]*) printf '0' ;;
     *) printf '%s' "$n" ;;
   esac
 }

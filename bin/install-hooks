@@ -37,7 +37,7 @@ fi
 # Ensure parent dir + settings.json exist.
 mkdir -p "$(dirname "$SETTINGS")"
 if [ ! -f "$SETTINGS" ]; then
-  printf '{}\n' > "$SETTINGS"
+  printf '{}\n' >"$SETTINGS"
 fi
 
 # Acquire an exclusive lock on the settings file via a sidecar lock file
@@ -133,7 +133,7 @@ jq --arg hook "$HOOK_BIN" --arg events "$events" '
   .hooks = (.hooks // {})
   | reduce ($events | split(" ")[]) as $ev (.; remove_ours_from_event($ev))
   | reduce ($events | split(" ")[]) as $ev (.; add_for_event($ev))
-' "$SETTINGS" > "$tmp"
+' "$SETTINGS" >"$tmp"
 
 # Validate the result before swapping.
 if ! jq -e . "$tmp" >/dev/null 2>&1; then
@@ -142,7 +142,7 @@ if ! jq -e . "$tmp" >/dev/null 2>&1; then
 fi
 
 mv -f "$tmp" "$SETTINGS"
-trap 'flock -u 200 2>/dev/null' EXIT  # tmp is gone; only release lock now
+trap 'flock -u 200 2>/dev/null' EXIT # tmp is gone; only release lock now
 
 cat <<EOF
 tmux-coding-agents: hooks installed in $SETTINGS

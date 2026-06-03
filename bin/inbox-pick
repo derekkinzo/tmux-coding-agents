@@ -30,21 +30,21 @@ hooks_installed() {
   if [ -r "$tag" ] && [ -r "$SETTINGS" ]; then
     mtime_settings="$(date -r "$SETTINGS" +%s 2>/dev/null || stat -c %Y "$SETTINGS" 2>/dev/null || echo 0)"
     mtime_tag="$(cat "$tag" 2>/dev/null || echo 0)"
-    case "$mtime_tag" in *[!0-9]*|'') mtime_tag=0 ;; esac
+    case "$mtime_tag" in *[!0-9]* | '') mtime_tag=0 ;; esac
     if [ "$mtime_tag" -ge "$mtime_settings" ]; then
       return 0
     fi
   fi
   if [ -r "$SETTINGS" ] \
-     && command -v jq >/dev/null 2>&1 \
-     && jq -e '
+    && command -v jq >/dev/null 2>&1 \
+    && jq -e '
        (.hooks // {}) | to_entries | any(.value | type == "array" and any(
          .hooks // [] | any(.command // "" | contains("tmux-coding-agents/bin/hook"))))
      ' "$SETTINGS" >/dev/null 2>&1; then
     # Cache the verification.
     if [ -n "$cache_dir" ]; then
       mtime_settings="$(date -r "$SETTINGS" +%s 2>/dev/null || stat -c %Y "$SETTINGS" 2>/dev/null || echo 0)"
-      printf '%s' "$mtime_settings" > "$tag" 2>/dev/null || true
+      printf '%s' "$mtime_settings" >"$tag" 2>/dev/null || true
     fi
     return 0
   fi
@@ -117,15 +117,15 @@ done <<<"$sorted_pane_ids"
 tmux show-options -g 2>/dev/null \
   | awk '/^@inbox-row-/ {print $1}' \
   | while IFS= read -r opt; do
-      [ -n "$opt" ] || continue
-      # Compute the pane_id portion (strip "@inbox-row-" prefix).
-      opt_pane="${opt#@inbox-row-}"
-      # Keep only options whose pane is still in $sorted_pane_ids.
-      case $'\n'"$sorted_pane_ids"$'\n' in
-        *$'\n'"$opt_pane"$'\n'*) : ;;     # still tracked → keep
-        *) tmux set-option -gu "$opt" 2>/dev/null || true ;;
-      esac
-    done
+    [ -n "$opt" ] || continue
+    # Compute the pane_id portion (strip "@inbox-row-" prefix).
+    opt_pane="${opt#@inbox-row-}"
+    # Keep only options whose pane is still in $sorted_pane_ids.
+    case $'\n'"$sorted_pane_ids"$'\n' in
+      *$'\n'"$opt_pane"$'\n'*) : ;; # still tracked → keep
+      *) tmux set-option -gu "$opt" 2>/dev/null || true ;;
+    esac
+  done
 
 now_epoch="$(date +%s)"
 while IFS=$'\t' read -r pane_id _kind status since_epoch _pid project _tpath; do

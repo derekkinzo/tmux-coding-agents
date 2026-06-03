@@ -37,8 +37,8 @@ fi
 # Compare major.minor as integer pair.
 ver_major="$(printf '%s' "$tmux_version_numeric" | cut -d. -f1)"
 ver_minor="$(printf '%s' "$tmux_version_numeric" | cut -d. -f2)"
-case "$ver_major" in *[!0-9]*|'') ver_major=0 ;; esac
-case "$ver_minor" in *[!0-9]*|'') ver_minor=0 ;; esac
+case "$ver_major" in *[!0-9]* | '') ver_major=0 ;; esac
+case "$ver_minor" in *[!0-9]* | '') ver_minor=0 ;; esac
 
 if [ "$ver_major" -lt 3 ] || { [ "$ver_major" -eq 3 ] && [ "$ver_minor" -lt 2 ]; }; then
   tmux display-message \
@@ -58,7 +58,7 @@ tca_default_opt() {
 }
 
 tca_default_opt "@inbox-pick-key" "a"
-tca_default_opt "@inbox-next-key" ""           # empty = unbound (opt-in)
+tca_default_opt "@inbox-next-key" "" # empty = unbound (opt-in)
 tca_default_opt "@inbox-question-detect" "on"
 tca_default_opt "@inbox-debug" "off"
 # @inbox-status-format intentionally has no default — empty triggers built-in.

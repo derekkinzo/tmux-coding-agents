@@ -87,7 +87,7 @@ if [ "$target" = "$current_pane" ] && [ "$n" -gt 1 ]; then
 fi
 
 # Update cursor.
-printf '%s' "$target" > "$cursor_file" 2>/dev/null || true
+printf '%s' "$target" >"$cursor_file" 2>/dev/null || true
 
 # Jump.
 tmux switch-client -t "$target" 2>/dev/null || tmux select-pane -t "$target" 2>/dev/null

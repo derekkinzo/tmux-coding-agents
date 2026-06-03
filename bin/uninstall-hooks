@@ -108,7 +108,7 @@ jq --arg hook "$HOOK_BIN" '
       | with_entries(select((.value | length) > 0))
     )
   end
-' "$SETTINGS" > "$tmp"
+' "$SETTINGS" >"$tmp"
 
 if ! jq -e . "$tmp" >/dev/null 2>&1; then
   err "filter produced invalid JSON; aborting (backup at $backup)"

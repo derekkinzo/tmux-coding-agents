@@ -20,12 +20,18 @@
 #   exit:   always 0
 detect::is_tracked_agent() {
   local pane_id="$1"
-  [ -n "$pane_id" ] || { printf ''; return 0; }
+  [ -n "$pane_id" ] || {
+    printf ''
+    return 0
+  }
 
   local pane_pid
   pane_pid="$(tmux display-message -p -t "$pane_id" '#{pane_pid}' 2>/dev/null)"
   case "$pane_pid" in
-    ''|*[!0-9]*) printf ''; return 0 ;;
+    '' | *[!0-9]*)
+      printf ''
+      return 0
+      ;;
   esac
 
   local hit
@@ -40,11 +46,17 @@ detect::is_tracked_agent() {
 # Print the PID of the interactive claude process running in this pane, or "".
 detect::pane_pid() {
   local pane_id="$1"
-  [ -n "$pane_id" ] || { printf ''; return 0; }
+  [ -n "$pane_id" ] || {
+    printf ''
+    return 0
+  }
   local pane_pid
   pane_pid="$(tmux display-message -p -t "$pane_id" '#{pane_pid}' 2>/dev/null)"
   case "$pane_pid" in
-    ''|*[!0-9]*) printf ''; return 0 ;;
+    '' | *[!0-9]*)
+      printf ''
+      return 0
+      ;;
   esac
   _detect_claude_in_subtree "$pane_pid"
 }
@@ -57,7 +69,10 @@ detect::pane_pid() {
 #   ""                               -> ""
 detect::pane_project() {
   local cwd="$1"
-  [ -n "$cwd" ] || { printf ''; return 0; }
+  [ -n "$cwd" ] || {
+    printf ''
+    return 0
+  }
   # Special-case the root: "/" stays "/".
   if [ "$cwd" = "/" ]; then
     printf '/'
@@ -86,7 +101,7 @@ detect::pane_project() {
 _detect_claude_in_subtree() {
   local root="$1"
   case "$root" in
-    ''|*[!0-9]*) return 0 ;;
+    '' | *[!0-9]*) return 0 ;;
   esac
 
   ps -eo pid=,ppid=,args= 2>/dev/null \

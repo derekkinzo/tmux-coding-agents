@@ -58,7 +58,7 @@ hook_debug_enabled() {
   [ "${INBOX_DEBUG:-}" = "on" ] && return 0
   if command -v tmux >/dev/null 2>&1; then
     case "$(tmux show-option -gqv '@inbox-debug' 2>/dev/null)" in
-      on|1|true) return 0 ;;
+      on | 1 | true) return 0 ;;
     esac
   fi
   return 1
@@ -108,7 +108,7 @@ pane_id="${TMUX_PANE:-}"
 # Pull what we need from the payload.
 session_pid="$(jsonpb::peek "$payload" 'pid')"
 case "$session_pid" in
-  ''|*[!0-9]*) session_pid='' ;;
+  '' | *[!0-9]*) session_pid='' ;;
 esac
 cwd="$(jsonpb::peek "$payload" 'cwd')"
 tpath="$(jsonpb::peek "$payload" 'transcript_path')"

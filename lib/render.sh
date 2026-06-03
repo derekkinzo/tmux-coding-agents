@@ -71,7 +71,10 @@ render::tmux_escape() {
 render::utf8_truncate_bytes() {
   local s="$1" max_bytes="$2"
   case "$max_bytes" in
-    ''|*[!0-9]*) printf '%s' "$s"; return 0 ;;
+    '' | *[!0-9]*)
+      printf '%s' "$s"
+      return 0
+      ;;
   esac
   if [ "${#s}" -le "$max_bytes" ]; then
     # ${#s} returns byte count under LC_ALL=C; under UTF-8 locale it
@@ -113,8 +116,8 @@ render::utf8_truncate_bytes() {
 #          embedded #[fg=...] markup. Caller wraps in #[default] if needed.
 render::status() {
   local waiting="${1:-0}" working="${2:-0}"
-  case "$waiting" in *[!0-9]*|'') waiting=0 ;; esac
-  case "$working" in *[!0-9]*|'') working=0 ;; esac
+  case "$waiting" in *[!0-9]* | '') waiting=0 ;; esac
+  case "$working" in *[!0-9]* | '') working=0 ;; esac
   if [ "$waiting" -eq 0 ] && [ "$working" -eq 0 ]; then
     return 0
   fi
@@ -138,9 +141,18 @@ render::row() {
   local status="$1" project="$2" age_secs="${3:-0}"
   local icon color
   case "$status" in
-    waiting) icon="$RENDER_ICON_WAITING"; color="$RENDER_COLOR_WAITING" ;;
-    working) icon="$RENDER_ICON_WORKING"; color="$RENDER_COLOR_WORKING" ;;
-    *)       icon="$RENDER_ICON_IDLE";    color="$RENDER_COLOR_IDLE" ;;
+    waiting)
+      icon="$RENDER_ICON_WAITING"
+      color="$RENDER_COLOR_WAITING"
+      ;;
+    working)
+      icon="$RENDER_ICON_WORKING"
+      color="$RENDER_COLOR_WORKING"
+      ;;
+    *)
+      icon="$RENDER_ICON_IDLE"
+      color="$RENDER_COLOR_IDLE"
+      ;;
   esac
   local age
   age="$(render::ago "$age_secs")"
@@ -161,7 +173,7 @@ render::row() {
 #          age ≥ 100 days so the column alignment in render::row remains stable.
 render::ago() {
   local s="${1:-0}"
-  case "$s" in *[!0-9]*|'') s=0 ;; esac
+  case "$s" in *[!0-9]* | '') s=0 ;; esac
   if [ "$s" -lt 60 ]; then
     printf '%2ds' "$s"
   elif [ "$s" -lt 3600 ]; then

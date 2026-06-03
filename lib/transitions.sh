@@ -24,7 +24,7 @@ _transitions_question_detect_enabled() {
   local v
   v="$(tmux show-option -gqv '@inbox-question-detect' 2>/dev/null)"
   case "$v" in
-    off|false|0) return 1 ;;
+    off | false | 0) return 1 ;;
     *) return 0 ;;
   esac
 }
@@ -60,7 +60,7 @@ _transitions_looks_like_question() {
     local last_byte
     last_byte=$(LC_ALL=C printf '%s' "${msg: -1}" 2>/dev/null)
     case "$last_byte" in
-      ' '|$'\t'|$'\n'|$'\r')
+      ' ' | $'\t' | $'\n' | $'\r')
         msg=$(LC_ALL=C printf '%s' "$msg" | LC_ALL=C cut -c1-$((${#msg} - 1)))
         ;;
       *) break ;;
@@ -77,10 +77,10 @@ _transitions_looks_like_question() {
 
   # Test in order from longest to shortest match.
   case "$tail_hex" in
-    *efbc9f) return 0 ;;   # full-width ？
-    *d89f)   return 0 ;;   # Arabic ؟
-    *3f)     return 0 ;;   # ASCII ?
-    *3b)     return 0 ;;   # ASCII ; (accepted false positive)
+    *efbc9f) return 0 ;; # full-width ？
+    *d89f) return 0 ;;   # Arabic ؟
+    *3f) return 0 ;;     # ASCII ?
+    *3b) return 0 ;;     # ASCII ; (accepted false positive)
   esac
   return 1
 }
@@ -96,7 +96,7 @@ transitions::next() {
   fi
 
   case "$event" in
-    UserPromptSubmit|PreToolUse|PostToolUse)
+    UserPromptSubmit | PreToolUse | PostToolUse)
       printf 'working'
       ;;
     Notification)

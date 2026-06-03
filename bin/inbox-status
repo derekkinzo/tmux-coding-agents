@@ -35,11 +35,11 @@ gc_if_due() {
   now="$(date +%s)"
   last=0
   [ -r "$tag" ] && last="$(cat "$tag" 2>/dev/null || echo 0)"
-  case "$last" in *[!0-9]*|'') last=0 ;; esac
+  case "$last" in *[!0-9]* | '') last=0 ;; esac
   if [ $((now - last)) -lt 4 ]; then
     return 0
   fi
-  printf '%s' "$now" > "$tag" 2>/dev/null || true
+  printf '%s' "$now" >"$tag" 2>/dev/null || true
   local alive
   alive="$(pgrep -u "$(id -u)" -x claude 2>/dev/null || true)"
   printf '%s\n' "$alive" | state::gc 2>/dev/null || true
@@ -57,8 +57,8 @@ counts="$(state::read 2>/dev/null \
     ' 2>/dev/null || printf '0\t0')"
 waiting="${counts%%$'\t'*}"
 working="${counts##*$'\t'}"
-case "$waiting" in *[!0-9]*|'') waiting=0 ;; esac
-case "$working" in *[!0-9]*|'') working=0 ;; esac
+case "$waiting" in *[!0-9]* | '') waiting=0 ;; esac
+case "$working" in *[!0-9]* | '') working=0 ;; esac
 
 # render::status emits empty when both are 0 — perfect for status-right
 # (segment disappears entirely in the steady idle state).

@@ -133,13 +133,14 @@ _state_with_lock() {
   # shellcheck disable=SC2034  # used inside `eval` below
   lock="$(state::lock_path)" || return 1
 
-  # Open a fresh fd. Try named-fd syntax first (bash 4.1+).
+  # Open a fresh fd. Use the named-fd syntax on bash 4.1+; fall back to a
+  # fixed fd 200 on bash 3.2 (which silently creates a `{lock_fd}` file
+  # rather than allocating a fd if we let the named-fd form run).
   local lock_fd
-  if eval 'exec {lock_fd}>>"$lock"' 2>/dev/null; then
-    :
+  local bash_major="${BASH_VERSINFO[0]:-0}" bash_minor="${BASH_VERSINFO[1]:-0}"
+  if [ "$bash_major" -gt 4 ] || { [ "$bash_major" -eq 4 ] && [ "$bash_minor" -ge 1 ]; }; then
+    eval 'exec {lock_fd}>>"$lock"' || return 1
   else
-    # Bash 3.2 fallback: pick fd 200 (high enough to avoid stdin/stdout/stderr
-    # and the conventional 9). Save any existing fd 200 first.
     lock_fd=200
     eval "exec ${lock_fd}>>\"\$lock\"" || return 1
   fi

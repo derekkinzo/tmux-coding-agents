@@ -71,7 +71,12 @@ jobs:
 
       - name: Install bats-core
         run: |
-          npm install -g bats
+          # apt has bats; on macOS we already brewed the rest, brew install bats too
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            sudo apt-get install -y bats
+          else
+            brew install bats-core
+          fi
           bats --version
 
       - name: Show bash version under test

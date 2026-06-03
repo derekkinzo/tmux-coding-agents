@@ -58,12 +58,12 @@ jobs:
 
       - name: Install runtime deps (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update -y && sudo apt-get install -y jq util-linux
+        run: sudo apt-get update -y && sudo apt-get install -y jq util-linux tmux
 
       - name: Install runtime deps (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install jq flock || true
+          brew install jq flock tmux || true
           # bash 3.2 lives at /bin/bash; bash 5.x via brew install bash.
           if [ "${{ matrix.bash }}" != "3.2" ]; then
             brew install bash
@@ -71,13 +71,13 @@ jobs:
 
       - name: Install bats-core
         run: |
-          # apt has bats; on macOS we already brewed the rest, brew install bats too
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            sudo apt-get install -y bats
-          else
-            brew install bats-core
-          fi
-          bats --version
+          # npm prefix to user dir (no sudo needed). Use bats-core 1.10+ which
+          # implements BATS_TEST_TMPDIR (Ubuntu 22.04's apt bats is 1.2.1, too old).
+          mkdir -p "$HOME/.npm-global"
+          npm config set prefix "$HOME/.npm-global"
+          npm install -g bats
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
+          "$HOME/.npm-global/bin/bats" --version
 
       - name: Show bash version under test
         run: |

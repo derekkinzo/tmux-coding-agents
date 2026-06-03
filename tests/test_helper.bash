@@ -16,7 +16,15 @@ MOCKS="$TEST_DIR/mocks"
 export PLUGIN_ROOT LIB BIN FIXTURES MOCKS
 
 # Per-test isolation.
+#
+# BATS_TEST_TMPDIR was added in bats-core 1.5; on older bats (Ubuntu 22.04
+# ships 1.2.1) we synthesize an equivalent under $BATS_TMPDIR or /tmp.
 setup_isolated_cache() {
+  if [ -z "${BATS_TEST_TMPDIR:-}" ]; then
+    BATS_TEST_TMPDIR="${BATS_TMPDIR:-/tmp}/tca-bats-$$-${BATS_TEST_NUMBER:-rand-$RANDOM}"
+    mkdir -p "$BATS_TEST_TMPDIR"
+    export BATS_TEST_TMPDIR
+  fi
   export XDG_CACHE_HOME="${BATS_TEST_TMPDIR}/cache"
   mkdir -p "$XDG_CACHE_HOME"
 }

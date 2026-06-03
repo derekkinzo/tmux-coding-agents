@@ -86,6 +86,12 @@ if [ "$target" = "$current_pane" ] && [ "$n" -gt 1 ]; then
   fi
 fi
 
+# SECURITY (review wzrzsw2vu sweep F3): defense-in-depth — if state.tsv ever
+# contains a malformed pane_id that survived the upstream filters, refuse to
+# pass it to tmux. tmux's -t doesn't shell-eval today, but this protects
+# against future regressions where $target reaches a format string.
+[[ "$target" =~ ^%[0-9]+$ ]] || exit 0
+
 # Update cursor.
 printf '%s' "$target" >"$cursor_file" 2>/dev/null || true
 

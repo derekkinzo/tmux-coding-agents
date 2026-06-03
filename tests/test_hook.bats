@@ -122,6 +122,18 @@ run_hook() {
   assert_equal "$proj_after" "$proj_before"
 }
 
+@test "hook accepts TMUX_PANE with 6+ digits (regression: case-glob was 5-digit max)" {
+  # On long-uptime tmux servers the pane_id counter can hit %100000+. The
+  # previous 1-5-digit case-glob silently dropped these.
+  run bash -c "cat '$FIXTURES/hook_user_prompt.json' | TMUX_PANE='%123456' '$BIN/hook' UserPromptSubmit"
+  assert_success
+  source "$LIB/state.sh"
+  rows=$(awk 'NR>1' "$(state::tsv_path)" | wc -l | tr -d ' ')
+  assert_equal "$rows" "1"
+  pane=$(awk -F'\t' 'NR>1 {print $1}' "$(state::tsv_path)")
+  assert_equal "$pane" "%123456"
+}
+
 @test "hook rejects malformed TMUX_PANE (RCE-defense regression)" {
   # TMUX_PANE controls the pane_id column. Without strict validation a hostile
   # value like "%1'; touch /tmp/RCE; echo '" would be stored as a row whose

@@ -130,13 +130,10 @@ pane_id="${TMUX_PANE:-}"
   hook_log "SKIP no TMUX_PANE event=$event"
   exit 0
 }
-case "$pane_id" in
-  %[0-9] | %[0-9][0-9] | %[0-9][0-9][0-9] | %[0-9][0-9][0-9][0-9] | %[0-9][0-9][0-9][0-9][0-9]) : ;;
-  *)
-    hook_log "DROP malformed TMUX_PANE='$pane_id' event=$event"
-    exit 0
-    ;;
-esac
+if [[ ! "$pane_id" =~ ^%[0-9]+$ ]]; then
+  hook_log "DROP malformed TMUX_PANE='$pane_id' event=$event"
+  exit 0
+fi
 
 # Pull what we need from the payload.
 session_pid="$(jsonpb::peek "$payload" 'pid')"

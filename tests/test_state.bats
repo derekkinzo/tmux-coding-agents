@@ -94,6 +94,36 @@ setup() {
   assert_equal "$perm" "700"
 }
 
+@test "state::gc_panes rewrites TSV dropping rows whose pane is not alive (review wzrzsw2vu HIGH)" {
+  # Lazy GC contract per DESIGN §4 / §6.4 / §10: when a pane disappears from
+  # tmux (e.g., closed window or tmux restart), the TSV must be rewritten on
+  # the next picker open — not just filtered in-memory.
+  state::upsert '%10' 'claude' 'waiting' '1700000000' '1' 'live' ''
+  state::upsert '%99' 'claude' 'working' '1700000100' '2' 'dead-1' ''
+  state::upsert '%100000' 'claude' 'idle' '1700000200' '3' 'dead-2-big-id' ''
+  printf '%%10\n' | state::gc_panes
+  rows=$(awk 'NR>1' "$(state::tsv_path)" | wc -l | tr -d ' ')
+  assert_equal "$rows" "1"
+  remaining=$(awk -F'\t' 'NR>1 {print $1}' "$(state::tsv_path)")
+  assert_equal "$remaining" "%10"
+}
+
+@test "state::gc_panes is no-op when alive set is empty (safety, like state::gc)" {
+  state::upsert '%10' 'claude' 'waiting' '1700000000' '1' 'a' ''
+  printf '' | state::gc_panes
+  rows=$(awk 'NR>1' "$(state::tsv_path)" | wc -l | tr -d ' ')
+  assert_equal "$rows" "1"
+}
+
+@test "state::upsert accepts pane_ids with 6+ digits (regression: was case-glob limited)" {
+  # Case-glob `%[0-9][0-9][0-9][0-9][0-9]` only matched 1-5 digits. Long-uptime
+  # tmux servers can allocate %100000+ and those rows must still flow through.
+  run state::upsert '%100000' 'claude' 'waiting' '1700000000' '1' 'p' ''
+  assert_success
+  run state::upsert '%99999999' 'claude' 'working' '1700000000' '2' 'q' ''
+  assert_success
+}
+
 @test "state::sweep_orphan_tmps removes stale tmpfiles, keeps recent ones" {
   cache="$(state::cache_dir)"
   # Stale (mtime > 1 minute ago).

@@ -374,3 +374,58 @@ _state_do_gc() {
   mv -f "$tmp" "$tsv" || return 1
   return 0
 }
+
+# --- gc_panes ---------------------------------------------------------------
+# Remove rows whose pane_id (column 1) is NOT in the supplied alive-pane set.
+# This satisfies DESIGN §4 / §6.4 / §10 "lazy garbage-collect: remove during
+# read-then-rewrite" — bin/inbox-pick calls this with `tmux list-panes` output
+# so a tmux restart (every pane gone) eventually empties the TSV.
+#
+# Usage:
+#   tmux list-panes -as -F '#{pane_id}' | state::gc_panes
+#
+# Safety: empty input is a no-op, same rationale as state::gc.
+state::gc_panes() {
+  local alive_panes=""
+  if [ ! -t 0 ]; then
+    alive_panes="$(cat)"
+  fi
+  case "$alive_panes" in
+    '' | $'\n' | *[!%0-9$'\n']*)
+      alive_panes="$(printf '%s\n' "$alive_panes" | awk 'NF && /^%[0-9]+$/')"
+      ;;
+  esac
+  if [ -z "$alive_panes" ]; then
+    return 0
+  fi
+  _state_with_lock -x _state_do_gc_panes "$alive_panes"
+}
+
+_state_do_gc_panes() {
+  local lock_fd="$1"
+  shift
+  local alive_panes="$1"
+
+  local tsv tmp
+  tsv="$(state::tsv_path)" || return 1
+  if [ -L "$tsv" ]; then
+    return 1
+  fi
+  [ -f "$tsv" ] || return 0
+  tmp="$(_state_tmpfile_for "$tsv")"
+  # shellcheck disable=SC2064
+  trap "rm -f '$tmp' 2>/dev/null" RETURN
+
+  STATE_ALIVE_PANES="$alive_panes" \
+    awk -F'\t' '
+      BEGIN {
+        n = split(ENVIRON["STATE_ALIVE_PANES"], parts, "\n")
+        for (i = 1; i <= n; i++) if (parts[i] != "") alive_set[parts[i]] = 1
+      }
+      NR == 1 { print; next }
+      $1 in alive_set { print }
+    ' "$tsv" >"$tmp" || return 1
+
+  mv -f "$tmp" "$tsv" || return 1
+  return 0
+}

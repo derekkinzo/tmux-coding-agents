@@ -364,10 +364,13 @@ _state_do_gc() {
         n = split(ENVIRON["STATE_ALIVE_PIDS"], parts, "\n")
         for (i = 1; i <= n; i++) if (parts[i] != "") alive_set[parts[i]] = 1
       }
+      # pid=="" or pid=="0" means unknown (some hook payloads omit pid).
+      # Keep those rows; gc_panes (tmux-pane existence) is the authoritative
+      # cleanup. Dropping them here would cause status-bar flicker.
       NR == 1 { print; next }
       {
         pid = $5
-        if (pid == "" || pid == "0") next
+        if (pid == "" || pid == "0") { print; next }
         if (pid in alive_set) print
       }
     ' "$tsv" >"$tmp" || return 1

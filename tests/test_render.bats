@@ -7,25 +7,27 @@ setup() {
   source "$LIB/render.sh"
 }
 
-@test "render::status with both 0 → empty" {
-  run render::status 0 0
+@test "render::status with all 0 → empty" {
+  run render::status 0 0 0
   assert_output ""
 }
 
-@test "render::status with waiting only" {
-  run render::status 1 0
-  assert_output --partial "NEED 1"
-  case "$output" in *"WORK"*) false ;; esac
+@test "render::status with idle only shows IDLE segment" {
+  run render::status 0 0 4
+  assert_output --partial "NEED 0"
+  assert_output --partial "WORK 0"
+  assert_output --partial "IDLE 4"
 }
 
-@test "render::status with both" {
-  run render::status 2 3
-  assert_output --partial "NEED 2"
-  assert_output --partial "WORK 3"
+@test "render::status with all three counts shows all three segments" {
+  run render::status 1 2 5
+  assert_output --partial "NEED 1"
+  assert_output --partial "WORK 2"
+  assert_output --partial "IDLE 5"
 }
 
 @test "render::status sanitizes non-numeric counts to 0" {
-  run render::status "garbage" "abc"
+  run render::status "garbage" "abc" "junk"
   assert_output ""
 }
 
@@ -108,13 +110,13 @@ setup() {
   assert_output ""
 }
 
-@test "render::status with template substitutes {NEED}/{WORK}" {
-  run render::status 3 5 'INBOX:{NEED}/{WORK}'
-  assert_output --partial "INBOX:3/5"
+@test "render::status template substitutes {NEED}/{WORK}/{IDLE}/{TOTAL}" {
+  run render::status 3 5 2 'INBOX:{NEED}/{WORK}/{IDLE}={TOTAL}'
+  assert_output "INBOX:3/5/2=10"
 }
 
-@test "render::status with template emits even when both counts are 0" {
-  run render::status 0 0 'idle:{NEED}'
-  # Built-in path is empty when both 0; template path overrides.
+@test "render::status template emits even when all counts are 0" {
+  run render::status 0 0 0 'idle:{TOTAL}'
+  # Built-in path is empty when all 0; template path overrides.
   assert_output "idle:0"
 }

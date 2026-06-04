@@ -183,4 +183,4 @@ fmt='#{?#{pane_in_mode},,}#{E:@inbox-row-#{pane_id}}'
 # from a malicious pane_id) closed the single-quote and ran arbitrary code.
 # argv form bypasses the inner shell entirely.
 exec tmux display-popup -E -h 70% -w 80% \
-  tmux choose-tree -Zw -f "$filter" -F "$fmt"
+  tmux choose-tree -Zs -f "$filter" -F "$fmt"

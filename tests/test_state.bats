@@ -177,6 +177,18 @@ setup() {
   assert_equal "$remaining" "%17"
 }
 
+@test "state::gc KEEPS rows with pid=0 (unknown — common when payload omits pid)" {
+  # Some Claude hook events ship payloads without a pid field; the hook stores
+  # 0 as a placeholder. Those rows must NOT be dropped by pgrep-based GC —
+  # otherwise the status bar flickers as rows appear and disappear every 4s.
+  # state::gc_panes (tmux-pane-existence) is the authoritative cleanup path.
+  state::upsert '%17' 'claude' 'working' '1700000000' '0' 'unknown-pid' ''
+  state::upsert '%18' 'claude' 'working' '1700000100' "$$" 'alive' ''
+  printf '%s\n' "$$" | state::gc
+  rows=$(awk 'NR>1' "$(state::tsv_path)" | wc -l | tr -d ' ')
+  assert_equal "$rows" "2"
+}
+
 @test "state::gc is a no-op when alive set is empty (safety guarantee)" {
   # If pgrep returns nothing (no Claude running), GC must NOT wipe rows —
   # otherwise inbox-status's opportunistic GC would clear the inbox the moment

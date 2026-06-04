@@ -124,42 +124,41 @@ render::utf8_truncate_bytes() {
 
 # --- status segment ---------------------------------------------------------
 #
-# Inputs:  $1 = waiting count, $2 = working count, $3 (optional) = template
-# Output:  empty string when both are 0; else a tmux-format-ready segment with
-#          embedded #[fg=...] markup. Caller wraps in #[default] if needed.
+# Inputs:  $1 = waiting count, $2 = working count, $3 = idle count,
+#          $4 (optional) = template
+# Output:  empty string when all three are 0; otherwise a tmux-format-ready
+#          segment "NEED N  WORK N  IDLE N" with embedded #[fg=...] markup.
+#          Total count = waiting + working + idle = number of tracked panes.
 #
-# Template substitution: when $3 is non-empty, substitutes literal `{NEED}`
-# and `{WORK}` placeholders with the counts and emits the template even when
-# both counts are zero. Used by bin/inbox-status when @inbox-status-format
-# is set. The template is passed through render::scrub_ansi by the caller —
-# render::status does no further sanitization (treat $3 as trusted markup).
+# Template substitution: when $4 is non-empty, substitutes `{NEED}`, `{WORK}`,
+# `{IDLE}`, and `{TOTAL}` placeholders and emits the template even when all
+# counts are zero (so a user can have a persistent badge in their status bar).
 render::status() {
-  local waiting="${1:-0}" working="${2:-0}" template="${3:-}"
+  local waiting="${1:-0}" working="${2:-0}" idle="${3:-0}" template="${4:-}"
   case "$waiting" in *[!0-9]* | '') waiting=0 ;; esac
   case "$working" in *[!0-9]* | '') working=0 ;; esac
+  case "$idle" in *[!0-9]* | '') idle=0 ;; esac
 
   if [ -n "$template" ]; then
-    # User-defined template overrides the built-in segment. Substitute
-    # placeholders. Leave the rest of the template untouched.
+    local total=$((waiting + working + idle))
     local out="$template"
     out="${out//\{NEED\}/$waiting}"
     out="${out//\{WORK\}/$working}"
+    out="${out//\{IDLE\}/$idle}"
+    out="${out//\{TOTAL\}/$total}"
     printf '%s' "$out"
     return 0
   fi
 
-  if [ "$waiting" -eq 0 ] && [ "$working" -eq 0 ]; then
+  # Hide entirely when nothing is tracked. Otherwise show all three segments
+  # so the total reads as: NEED + WORK + IDLE = tracked Claude sessions.
+  if [ "$waiting" -eq 0 ] && [ "$working" -eq 0 ] && [ "$idle" -eq 0 ]; then
     return 0
   fi
-  local out=""
-  if [ "$waiting" -gt 0 ]; then
-    out="#[fg=${RENDER_COLOR_WAITING},bold]NEED ${waiting}#[default]"
-  fi
-  if [ "$working" -gt 0 ]; then
-    [ -n "$out" ] && out="${out}  "
-    out="${out}#[fg=${RENDER_COLOR_WORKING}]WORK ${working}#[default]"
-  fi
-  printf '%s' "$out"
+  printf '#[fg=%s,bold]NEED %d#[default]  #[fg=%s]WORK %d#[default]  #[fg=%s]IDLE %d#[default]' \
+    "$RENDER_COLOR_WAITING" "$waiting" \
+    "$RENDER_COLOR_WORKING" "$working" \
+    "$RENDER_COLOR_IDLE"    "$idle"
 }
 
 # --- picker row -------------------------------------------------------------

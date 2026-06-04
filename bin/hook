@@ -200,9 +200,16 @@ elif [ -n "$new_state" ]; then
 fi
 
 # Nudge tmux to repaint the status bar so the user sees state changes promptly,
-# without having to wait for status-interval to tick.
+# without having to wait for status-interval to tick. When a pane transitions
+# INTO waiting (was anything else) we additionally surface a brief
+# display-message on every attached client so the user notices even when
+# their eyes are not on the status segment.
 if command -v tmux >/dev/null 2>&1 && [ -n "${TMUX:-}" ]; then
   tmux refresh-client -S 2>/dev/null || true
+  if [ "${new_state:-}" = "waiting" ] && [ "${current_state:-}" != "waiting" ]; then
+    proj_msg="${local_project:-pane $pane_id}"
+    tmux display-message "tmux-coding-agents: $proj_msg needs you" 2>/dev/null || true
+  fi
 fi
 
 exit 0

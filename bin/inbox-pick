@@ -114,73 +114,37 @@ if [ -z "$sorted_pane_ids" ]; then
   exit 0
 fi
 
-# Build a filter for choose-tree:  -f '#{||:#{==:#{pane_id},%17},#{==:#{pane_id},%18}}'
-# Compose iteratively to handle ≥1 panes safely.
+# Hand off to the categorized TUI. The popup runs bin/inbox-popup, which:
+#   - reads $rows on stdin
+#   - draws a NEED/WORK/IDLE grouped picker with right-side preview
+#   - prints the chosen pane_id to its stdout (empty on cancel)
 #
-# SECURITY: each pid is re-validated against the strict pattern before
-# interpolation into the tmux format string. Belt-and-suspenders with the
-# state::read filter above.
-filter=""
-while IFS= read -r pid; do
-  [ -n "$pid" ] || continue
-  # Bash regex matches arbitrary-length pane_ids (long-uptime tmux servers
-  # can allocate %100000+, which a fixed-width case-glob would silently drop).
-  [[ "$pid" =~ ^%[0-9]+$ ]] || continue
-  local_eq="#{==:#{pane_id},${pid}}"
-  if [ -z "$filter" ]; then
-    filter="$local_eq"
-  else
-    filter="#{||:${filter},${local_eq}}"
-  fi
-done <<<"$sorted_pane_ids"
+# We capture the popup's stdout via a temp file because `tmux display-popup`
+# does not stream child stdout back to the caller. After the popup closes we
+# read the file, validate the pane_id, and switch the active client.
+out_file="$(mktemp -t tca-pick.XXXXXX)"
+trap 'rm -f "$out_file"' EXIT
 
-# Format string for each row. We embed our render::row output as a tmux format
-# fragment by walking the rows and producing a -F template. Since choose-tree
-# evaluates the format per-pane, we need ONE template that pulls dynamic data
-# from the running pane AND merges our state info. We pre-compute a per-pane
-# format key by setting a tmux user-option @inbox-row-<pane_id> from this
-# script, then reference it.
-#
-# Each option holds the rendered row content for its pane, scrubbed.
-#
-# Leak prevention: on every invocation, first unset every existing
-# @inbox-row-* option that doesn't correspond to a currently-tracked pane.
-# Without this, options accumulate forever as panes come and go.
+popup_cmd="cat <<'__TCA_ROWS__' | $(printf '%q' "$PLUGIN_ROOT/bin/inbox-popup") > $(printf '%q' "$out_file")
+$rows
+__TCA_ROWS__
+"
 
-# Unset stale @inbox-row-* options. show-options -g matches the literal "-g"
-# scope; tr -d strips quoting, awk extracts keys, set-option -u removes.
-tmux show-options -g 2>/dev/null \
-  | awk '/^@inbox-row-/ {print $1}' \
-  | while IFS= read -r opt; do
-    [ -n "$opt" ] || continue
-    # Compute the pane_id portion (strip "@inbox-row-" prefix).
-    opt_pane="${opt#@inbox-row-}"
-    # Keep only options whose pane is still in $sorted_pane_ids.
-    case $'\n'"$sorted_pane_ids"$'\n' in
-      *$'\n'"$opt_pane"$'\n'*) : ;; # still tracked → keep
-      *) tmux set-option -gu "$opt" 2>/dev/null || true ;;
-    esac
-  done
+# `tmux display-popup -E` runs the argument string with `sh -c`. We feed it
+# our here-doc + redirect so the popup sees $rows on stdin and writes its
+# choice to $out_file. The here-doc delimiter is unique enough that even
+# malicious row content cannot terminate it (and pane_ids are validated to
+# `^%[0-9]+$` before reaching here, so $rows is structurally safe).
+tmux display-popup -E -h 80% -w 90% "$popup_cmd"
 
-now_epoch="$(date +%s)"
-while IFS=$'\t' read -r pane_id _kind status since_epoch _pid project _tpath; do
-  [ -n "${pane_id:-}" ] || continue
-  # Strict re-validation, arbitrary-length digits.
-  [[ "$pane_id" =~ ^%[0-9]+$ ]] || continue
-  age=$((now_epoch - since_epoch))
-  rendered="$(render::row "$status" "$project" "$age")"
-  # Set as a per-pane user option (works on tmux 3.2+).
-  tmux set-option -gq "@inbox-row-${pane_id}" "$rendered" 2>/dev/null || true
-done <<<"$rows"
-
-# Use that per-pane option in the format string.
-fmt='#{?#{pane_in_mode},,}#{E:@inbox-row-#{pane_id}}'
-
-# SECURITY (review wwbo2gfgl CRITICAL): pass the choose-tree command as ARGV
-# (separate args), not as a single shell-parsed string. With the previous
-# string form, `tmux display-popup -E "tmux choose-tree -Zw -f '$filter' ..."`
-# spawned a child sh which re-parsed the string — a `'` inside $filter (e.g.,
-# from a malicious pane_id) closed the single-quote and ran arbitrary code.
-# argv form bypasses the inner shell entirely.
-exec tmux display-popup -E -h 70% -w 80% \
-  tmux choose-tree -Zs -f "$filter" -F "$fmt"
+selected="$(tr -d '\r\n' <"$out_file" 2>/dev/null || true)"
+case "$selected" in
+  '') exit 0 ;;
+  *)
+    if [[ "$selected" =~ ^%[0-9]+$ ]]; then
+      tmux switch-client -t "$selected" 2>/dev/null \
+        || tmux select-pane -t "$selected" 2>/dev/null \
+        || true
+    fi
+    ;;
+esac

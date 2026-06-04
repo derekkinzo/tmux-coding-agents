@@ -14,13 +14,34 @@ setup() {
   assert_output "working"
 }
 
-@test "PreToolUse → working" {
-  run transitions::next claude waiting PreToolUse '{}'
+@test "PreToolUse from idle → working" {
+  run transitions::next claude idle PreToolUse '{}'
   assert_output "working"
 }
 
-@test "PostToolUse → working" {
+@test "PostToolUse from working → working" {
   run transitions::next claude working PostToolUse '{}'
+  assert_output "working"
+}
+
+@test "PreToolUse from waiting STAYS waiting (sticky NEED)" {
+  # When the user is needed, tool-flow events do not silently clear the
+  # signal. Without this, the waiting state lasts only as long as the
+  # gap between the prompt and the tool's next call — typically too short
+  # for the user to notice in the status bar.
+  run transitions::next claude waiting PreToolUse '{}'
+  assert_output "waiting"
+}
+
+@test "PostToolUse from waiting STAYS waiting (sticky NEED)" {
+  run transitions::next claude waiting PostToolUse '{}'
+  assert_output "waiting"
+}
+
+@test "UserPromptSubmit from waiting → working (human re-engaged clears NEED)" {
+  # The strong signal that the human is back is a fresh prompt submission,
+  # which always clears waiting.
+  run transitions::next claude waiting UserPromptSubmit '{}'
   assert_output "working"
 }
 

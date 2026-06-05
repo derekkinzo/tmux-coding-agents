@@ -38,7 +38,7 @@ set -ag status-right ' #(~/.tmux/plugins/tmux-coding-agents/bin/inbox-status)'
 
 | Keybind | Action |
 |---|---|
-| `prefix + a` | Open the picker. j/k to navigate, Enter to jump, q to close, v to toggle preview. |
+| `prefix + a` | Open the picker (fzf-driven). Type to filter; j/k or arrows to navigate; Enter to jump; `?` toggles preview; Esc closes. |
 | `prefix + <next-key>` (opt-in) | Jump to next waiting pane without opening the picker. |
 
 The plugin tracks every interactive `claude` REPL running in a tmux pane.
@@ -57,8 +57,14 @@ States: **waiting** (red `!`) → needs your input now; **working** (orange `▶
 
 ## Requirements
 
-tmux 3.2+, bash 3.2+, Claude Code, and `jq` (`brew install jq` /
-`apt install jq`).
+tmux 3.2+, bash 3.2+, Claude Code, plus two small CLI tools the picker
+relies on:
+
+- `jq` for safe JSON parsing of hook payloads
+- `fzf` for the picker's selection UI and live preview window
+
+Install on Linux: `apt install jq fzf` (or `dnf` / `apk`).
+Install on macOS: `brew install jq fzf`.
 
 To target a non-default settings file, set `CLAUDE_SETTINGS=/path/to/settings.json`
 before running `install-hooks`. Symlinked settings files are preserved.

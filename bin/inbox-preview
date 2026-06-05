@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# bin/inbox-preview — fzf preview content for a single tracked pane.
+#
+# Usage:  inbox-preview <pane_id>
+# Stdout: a multi-line preview block:
+#           <header line: state · project · age>
+#           <separator>
+#           <last N lines of the pane's visible terminal, ANSI-preserved>
+#         When the pane is no longer alive, prints "(pane closed)".
+#
+# This is invoked by fzf via --preview, once per highlighted row. It must
+# be cheap (forks: tmux capture-pane + a couple of awks) and never blocks.
+
+set -uo pipefail
+
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+. "$PLUGIN_ROOT/lib/state.sh"
+# shellcheck disable=SC1091
+. "$PLUGIN_ROOT/lib/render.sh"
+
+pane_id="${1:-}"
+[[ "$pane_id" =~ ^%[0-9]+$ ]] || {
+  printf '—\n'
+  exit 0
+}
+
+# Look up our row in state.tsv. If not found, fall back to bare-pane preview.
+row="$(state::read 2>/dev/null | awk -F'\t' -v p="$pane_id" '$1 == p { print; exit }' || true)"
+
+if [ -n "$row" ]; then
+  status="$(printf '%s' "$row" | awk -F'\t' '{print $3}')"
+  since="$(printf '%s' "$row" | awk -F'\t' '{print $4}')"
+  project="$(printf '%s' "$row" | awk -F'\t' '{print $6}')"
+  case "$since" in '' | *[!0-9]*) since=0 ;; esac
+  now="$(date +%s)"
+  age="$(render::ago "$((now - since))")"
+  case "$status" in
+    waiting)
+      icon='!'
+      color='1;31'
+      label='waiting'
+      ;;
+    working)
+      icon='▶'
+      color='33'
+      label='working'
+      ;;
+    idle)
+      icon='·'
+      color='90'
+      label='idle'
+      ;;
+    *)
+      icon='·'
+      color='90'
+      label="$status"
+      ;;
+  esac
+  proj_clean="$(printf '%s' "$project" | render::scrub_ansi)"
+  printf '\033[%sm%s %s\033[0m  %s  ·  %s\n' "$color" "$icon" "$label" "$proj_clean" "$age"
+else
+  printf '%s  ·  (untracked)\n' "$pane_id"
+fi
+
+# Separator. Width comes from fzf via FZF_PREVIEW_COLUMNS; default 60.
+width="${FZF_PREVIEW_COLUMNS:-60}"
+case "$width" in '' | *[!0-9]*) width=60 ;; esac
+[ "$width" -gt 200 ] && width=200
+printf '%*s\n' "$width" '' | tr ' ' '─'
+
+# Body: live capture-pane of the target. -e preserves ANSI for color. -S -2000
+# pulls in a generous scrollback chunk; we then strip Claude's TUI chrome
+# (anchored on the "⏵" auto-mode chevrons that appear nowhere else) and tail
+# to the available preview height.
+lines="${FZF_PREVIEW_LINES:-30}"
+case "$lines" in '' | *[!0-9]*) lines=30 ;; esac
+body_lines=$((lines - 3))
+[ "$body_lines" -lt 1 ] && body_lines=1
+
+if ! raw_body="$(tmux capture-pane -p -e -t "$pane_id" -S -2000 2>/dev/null)"; then
+  printf '(pane closed)\n'
+  exit 0
+fi
+
+# Strip Claude Code TUI chrome by cutting 5 lines above the auto-mode hint.
+# If no hint marker is found (plain shell pane), keep the capture as-is.
+# After the cut, trim trailing blank lines so `tail` doesn't waste preview
+# area on whitespace.
+printf '%s\n' "$raw_body" \
+  | awk '
+      { lines[NR] = $0 }
+      /⏵/ { hint = NR }
+      END {
+        last = (hint > 0 ? hint - 5 : NR)
+        if (last < 1) last = 0
+        while (last > 0 && lines[last] ~ /^[[:space:]]*$/) last--
+        for (i = 1; i <= last; i++) print lines[i]
+      }
+    ' \
+  | tail -n "$body_lines"

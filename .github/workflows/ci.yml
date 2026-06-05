@@ -58,12 +58,12 @@ jobs:
 
       - name: Install runtime deps (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update -y && sudo apt-get install -y jq util-linux tmux
+        run: sudo apt-get update -y && sudo apt-get install -y jq fzf util-linux tmux
 
       - name: Install runtime deps (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install jq flock tmux || true
+          brew install jq fzf flock tmux || true
           # bash 3.2 lives at /bin/bash; bash 5.x via brew install bash.
           if [ "${{ matrix.bash }}" != "3.2" ]; then
             brew install bash

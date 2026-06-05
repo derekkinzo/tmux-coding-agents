@@ -1,46 +1,25 @@
 #!/usr/bin/env bash
-# bin/inbox-popup — interactive inbox picker (TUI inside `tmux display-popup`).
+# bin/inbox-popup — interactive inbox picker, powered by fzf.
 #
-# Renders a state-grouped list of tracked panes (NEED / WORK / IDLE) with a
-# right-side preview of the selected agent's transcript. Reads keys; on Enter
-# prints the selected pane_id to stdout and exits 0. On Esc/q exits 0 with no
-# output (caller treats empty stdout as "user cancelled").
+# Reads tracked-pane rows from a file path (argv[1]) and runs fzf with a
+# state-grouped list and a live capture-pane preview on the right. On Enter
+# the selected pane_id is printed to stdout. Esc / Ctrl-C cancels with
+# empty stdout. The caller (bin/inbox-pick) interprets empty stdout as
+# "user cancelled".
 #
-# Why a custom TUI rather than tmux's native choose-tree:
-#   choose-tree is a session/window/pane navigator; it cannot group by an
-#   external attribute (our state) or render colored icons keyed off that
-#   attribute. The categorized list with icons is the inbox's core UX.
-#
-# Layout (drawn into the popup pane via ANSI):
-#   ┌─ Claude inbox  ── 1 NEED · 2 WORK · 3 IDLE ────────┐
-#   │                                                    │
-#   │  NEED                            ┊  preview        │
-#   │   1 ! waiting-project   2m       ┊  …              │
-#   │  WORK                            ┊                 │
-#   │   2 ▶ build-task        15s      ┊                 │
-#   │   3 ▶ research          45s      ┊                 │
-#   │  IDLE                            ┊                 │
-#   │   4 · old-session       1h       ┊                 │
-#   │                                                    │
-#   │  hjkl/↑↓ · 1-9 · Enter · q/Esc                     │
-#   └────────────────────────────────────────────────────┘
+# Why fzf rather than a hand-rolled bash TUI:
+#   fzf provides typeahead filtering, native arrow/hjkl navigation, mouse,
+#   prompt + footer, an async preview window with toggle, and consistent
+#   theming via FZF_DEFAULT_OPTS. Reimplementing those primitives in pure
+#   bash produces a worse UX in much more code.
 #
 # Inputs:
-#   $1                   — path to a file holding the TSV rows (no header),
-#                          one per tracked pane, 7 columns: pane_id kind
-#                          status since_epoch pid project transcript_path
-#   stdout               — selected pane_id on Enter; empty on cancel
-#   stderr               — drawing output (the popup terminal)
-#   /dev/tty             — keystrokes (the TUI reads keys from /dev/tty so
-#                          stdin redirection does not interfere)
+#   $1                 — path to a file holding the TSV rows (no header),
+#                        7 columns: pane_id kind status since_epoch pid
+#                        project transcript_path
+#   stdout             — selected pane_id on Enter; empty on cancel
 #
-# Implementation notes:
-#   - Pure bash + ANSI (no fzf, no python). Keeps the runtime dependency
-#     surface minimal and matches the rest of the plugin.
-#   - Terminal-control via `tput` when present (portable across BSD/Linux).
-#     Falls back to literal ANSI when `tput` is absent.
-#   - Read keys with `read -rsn1` from /dev/tty; multi-byte sequences (arrows)
-#     are caught by an additional non-blocking read for the bracket and letter.
+# Required tools: fzf, tmux, awk, sort.
 
 set -uo pipefail
 
@@ -48,301 +27,92 @@ PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/render.sh"
 
-# ---- terminal-control helpers ----------------------------------------------
-#
-# tput provides portable escape sequences. When tput is unavailable (rare:
-# minimal containers) we fall back to literal ANSI.
-if command -v tput >/dev/null 2>&1; then
-  TPUT() { tput "$@" 2>/dev/null; }
-else
-  TPUT() {
-    case "$1" in
-      clear) printf '\033[2J\033[H' ;;
-      civis) printf '\033[?25l' ;;
-      cnorm) printf '\033[?25h' ;;
-      cup) printf '\033[%d;%dH' "$(($2 + 1))" "$(($3 + 1))" ;;
-      sgr0) printf '\033[0m' ;;
-      bold) printf '\033[1m' ;;
-      smso) printf '\033[7m' ;;
-      rmso) printf '\033[0m' ;;
-      el) printf '\033[K' ;;
-      cols) printf '%s' "${COLUMNS:-80}" ;;
-      lines) printf '%s' "${LINES:-24}" ;;
-      *) : ;;
-    esac
-  }
-fi
-
-# Cursor + cleanup on any exit path. Prevents a wedged terminal if the script
-# is killed mid-render by a signal.
-cleanup() {
-  TPUT cnorm
-  TPUT sgr0
-  printf '\n'
-}
-trap cleanup EXIT
-
-# ---- read input -------------------------------------------------------------
-rows_file="${1:-}"
-if [ -z "$rows_file" ] || [ ! -r "$rows_file" ]; then
-  printf 'inbox-popup: rows-file path missing or unreadable: %s\n' "${rows_file:-<empty>}" >&2
+if ! command -v fzf >/dev/null 2>&1; then
+  printf 'inbox-popup: fzf is required (https://github.com/junegunn/fzf)\n' >&2
   exit 1
 fi
-rows="$(cat "$rows_file")"
-if [ -z "$rows" ]; then
-  printf 'no Claude sessions tracked yet\n' >&2
-  exit 0
+
+rows_file="${1:-}"
+if [ -z "$rows_file" ] || [ ! -r "$rows_file" ]; then
+  printf 'inbox-popup: rows-file path missing or unreadable\n' >&2
+  exit 1
 fi
 
-# Filter: only keep rows with a valid pane_id. Defense in depth — the caller
-# already validates, but the TUI must never interpolate untrusted text into
-# the preview command.
-rows="$(printf '%s\n' "$rows" | awk -F'\t' '$1 ~ /^%[0-9]+$/ { print }')"
-if [ -z "$rows" ]; then
-  printf 'no Claude sessions tracked yet\n' >&2
-  exit 0
-fi
+now_epoch="$(date +%s)"
 
-# ---- partition into NEED / WORK / IDLE -------------------------------------
+# Build the fzf input. Each line is TAB-separated:
+#   col 1: pane_id (or '__hdr__' for section headers)
+#   col 2: rendered display text (already ANSI-colored where appropriate)
 #
-# Each section is sorted newest-first by since_epoch. The sort key is built
-# inline (10-digit "9999999999 - epoch") so plain `sort -n` orders newest
-# first across all rows, regardless of their absolute size.
-sort_section() {
-  local target="$1"
-  awk -F'\t' -v t="$target" '$3 == t {
+# fzf is invoked with --with-nth=2.. so col 1 is hidden but available via
+# {1} in --preview / --bind transforms.
+build_fzf_input() {
+  local target="$1" label="$2" color="$3" icon="$4"
+  local section_rows
+  section_rows="$(awk -F'\t' -v t="$target" '$3 == t {
     inv = 9999999999 - $4
     printf "%010d\t%s\n", inv, $0
-  }' <<<"$rows" \
-    | sort -t$'\t' -k1,1n \
-    | cut -f2-
-}
-
-NEED_ROWS="$(sort_section waiting)"
-WORK_ROWS="$(sort_section working)"
-IDLE_ROWS="$(sort_section idle)"
-
-NEED_N=$([ -n "$NEED_ROWS" ] && printf '%s\n' "$NEED_ROWS" | wc -l | tr -d ' ' || echo 0)
-WORK_N=$([ -n "$WORK_ROWS" ] && printf '%s\n' "$WORK_ROWS" | wc -l | tr -d ' ' || echo 0)
-IDLE_N=$([ -n "$IDLE_ROWS" ] && printf '%s\n' "$IDLE_ROWS" | wc -l | tr -d ' ' || echo 0)
-
-# Visible rows array (in display order; empty sections are hidden, but their
-# rows are still in this array — section headers are drawn separately).
-VISIBLE_ROWS=()
-while IFS= read -r r; do [ -n "$r" ] && VISIBLE_ROWS+=("$r"); done <<<"$NEED_ROWS"
-while IFS= read -r r; do [ -n "$r" ] && VISIBLE_ROWS+=("$r"); done <<<"$WORK_ROWS"
-while IFS= read -r r; do [ -n "$r" ] && VISIBLE_ROWS+=("$r"); done <<<"$IDLE_ROWS"
-
-TOTAL=${#VISIBLE_ROWS[@]}
-[ "$TOTAL" -eq 0 ] && exit 0
-
-# ---- icons / colors per state (mirror lib/render.sh palette) ---------------
-ICON_NEED='!'
-ICON_WORK='▶'
-ICON_IDLE='·'
-COL_NEED='\033[1;31m' # bold red — Wong vermillion #dc322f approximated
-COL_WORK='\033[33m'   # orange (terminal yellow tone)
-COL_IDLE='\033[90m'   # bright black / grey
-COL_HEAD='\033[1m'    # bold
-COL_HINT='\033[2m'    # dim
-COL_RESET='\033[0m'
-
-# ---- selection state -------------------------------------------------------
-SEL=0 # index into VISIBLE_ROWS
-
-# ---- render::ago is sourced; expose a simple wrapper -----------------------
-fmt_age() {
-  local since="$1"
-  local now
-  now="$(date +%s)"
-  render::ago "$((now - since))"
-}
-
-# ---- preview command -------------------------------------------------------
-#
-# Reads the tail of the transcript file. Falls back to a placeholder if the
-# transcript is missing or unreadable. We pass the path as argv (no shell
-# interpolation) and clamp the line count.
-preview_for() {
-  local tpath="$1" lines="$2"
-  if [ -z "$tpath" ] || [ ! -r "$tpath" ]; then
-    printf '%s' '(no transcript)'
+  }' "$rows_file" | sort -t$'\t' -k1,1n | cut -f2-)"
+  if [ -z "$section_rows" ]; then
     return 0
   fi
-  # Last N lines, control bytes scrubbed (terminal-safety per render.sh).
-  tail -n "$lines" -- "$tpath" 2>/dev/null | render::scrub_ansi
+  # Section header.
+  printf '__hdr__\t\033[1;%sm%s\033[0m\n' "$color" "$label"
+  # Rows.
+  while IFS=$'\t' read -r pane_id _kind _status since _pid project _tpath; do
+    [ -n "$pane_id" ] || continue
+    local age proj_disp
+    case "$since" in '' | *[!0-9]*) since=0 ;; esac
+    age="$(render::ago "$((now_epoch - since))")"
+    proj_disp="$(printf '%s' "$project" | render::scrub_ansi)"
+    # Truncate project to a stable width (45 bytes) for column alignment.
+    if [ "${#proj_disp}" -gt 45 ]; then
+      proj_disp="$(render::utf8_truncate_bytes "$proj_disp" 44)…"
+    fi
+    printf '%s\t  \033[%sm%s\033[0m  %-45s  %s\n' \
+      "$pane_id" "$color" "$icon" "$proj_disp" "$age"
+  done <<<"$section_rows"
 }
 
-# ---- draw routine ----------------------------------------------------------
-#
-# Writes directly to stderr (the popup terminal). Stdout is reserved for the
-# selected pane_id (printed exactly once on Enter, then we exit).
-draw() {
-  local cols rows_lines
-  cols=$(TPUT cols)
-  rows_lines=$(TPUT lines)
-  : "${cols:=80}"
-  : "${rows_lines:=24}"
+input="$(
+  build_fzf_input waiting NEED '31' '!'
+  build_fzf_input working WORK '33' '▶'
+  build_fzf_input idle IDLE '90' '·'
+)"
 
-  local list_w pv_w pv_col
-  list_w=$((cols * 60 / 100))
-  pv_w=$((cols - list_w - 3))
-  pv_col=$((list_w + 3))
+if [ -z "$input" ]; then
+  printf 'no Claude sessions tracked yet\n' >&2
+  exit 0
+fi
 
-  TPUT clear >&2
-  TPUT civis >&2
+# fzf options. Bind enter:transform so selecting a section header is a no-op
+# (fzf sees `ignore` and stays open). j/k/arrows navigate; q only triggers
+# fzf's filter, so we add --bind=q:abort for an explicit exit. The preview
+# script is invoked per-row with the pane_id.
+sel="$(printf '%s\n' "$input" \
+  | fzf \
+    --ansi \
+    --delimiter=$'\t' \
+    --with-nth='2..' \
+    --no-sort \
+    --layout=reverse \
+    --prompt='agents> ' \
+    --pointer='›' \
+    --header='enter: jump · ?: toggle preview · esc: close' \
+    --header-first \
+    --preview="bash $(printf '%q' "$PLUGIN_ROOT/bin/inbox-preview") {1}" \
+    --preview-window='right:55%:wrap' \
+    --bind='?:toggle-preview' \
+    --bind='enter:transform:[ {1} = __hdr__ ] && echo ignore || echo accept' \
+    --bind='j:down' \
+    --bind='k:up' \
+    --bind='ctrl-c:abort' \
+  || true)"
 
-  # Title bar.
-  printf '%b' "$COL_HEAD" >&2
-  printf '  Claude inbox   %d NEED · %d WORK · %d IDLE' \
-    "$NEED_N" "$WORK_N" "$IDLE_N" >&2
-  printf '%b\n\n' "$COL_RESET" >&2
+[ -n "$sel" ] || exit 0
 
-  local row_idx=0 line=2
-  draw_section() {
-    local label="$1" rows_text="$2" color="$3" icon="$4"
-    [ -z "$rows_text" ] && return 0
-    # Section header.
-    TPUT cup "$line" 2 >&2
-    printf '%b%s%b' "$COL_HEAD" "$label" "$COL_RESET" >&2
-    line=$((line + 1))
-    # Rows.
-    while IFS=$'\t' read -r pane_id _kind _status since _pid project _tpath; do
-      [ -n "$pane_id" ] || continue
-      [ "$line" -ge $((rows_lines - 2)) ] && break
-      TPUT cup "$line" 2 >&2
-      local marker=' ' age proj_disp num
-      age="$(fmt_age "$since")"
-      # Truncate project to fit.
-      local proj_max=$((list_w - 12))
-      [ "$proj_max" -lt 4 ] && proj_max=4
-      proj_disp="$(printf '%s' "$project" | render::scrub_ansi)"
-      if [ "${#proj_disp}" -gt "$proj_max" ]; then
-        proj_disp="$(render::utf8_truncate_bytes "$proj_disp" "$((proj_max - 1))")…"
-      fi
-      num=$((row_idx + 1))
-      if [ "$row_idx" -eq "$SEL" ]; then
-        marker='›'
-        TPUT smso >&2
-      fi
-      # quick-jump number for first 9 entries
-      local num_label='  '
-      [ "$num" -le 9 ] && num_label="$(printf '%d ' "$num")"
-      printf '  %s %b%s%b %s %-*s  %3s' \
-        "$marker" "$color" "$icon" "$COL_RESET" \
-        "$num_label" "$proj_max" "$proj_disp" "$age" >&2
-      [ "$row_idx" -eq "$SEL" ] && TPUT rmso >&2
-      line=$((line + 1))
-      row_idx=$((row_idx + 1))
-    done <<<"$rows_text"
-    line=$((line + 1)) # blank between sections
-  }
-
-  draw_section "NEED" "$NEED_ROWS" "$COL_NEED" "$ICON_NEED"
-  draw_section "WORK" "$WORK_ROWS" "$COL_WORK" "$ICON_WORK"
-  draw_section "IDLE" "$IDLE_ROWS" "$COL_IDLE" "$ICON_IDLE"
-
-  # Right preview pane.
-  if [ "$SEL" -lt "$TOTAL" ]; then
-    local sel_row="${VISIBLE_ROWS[$SEL]}"
-    local sel_tpath sel_proj
-    sel_tpath="$(printf '%s' "$sel_row" | awk -F'\t' '{print $7}')"
-    sel_proj="$(printf '%s' "$sel_row" | awk -F'\t' '{print $6}')"
-    TPUT cup 2 "$pv_col" >&2
-    printf '%b%s%b' "$COL_HEAD" "preview: $(printf '%s' "$sel_proj" | render::scrub_ansi)" "$COL_RESET" >&2
-    local pv_lines=$((rows_lines - 6))
-    [ "$pv_lines" -lt 3 ] && pv_lines=3
-    local pv_line=4 ln
-    preview_for "$sel_tpath" "$pv_lines" \
-      | while IFS= read -r ln; do
-        [ "$pv_line" -ge $((rows_lines - 2)) ] && break
-        # Truncate to preview width.
-        if [ "${#ln}" -gt "$pv_w" ]; then
-          ln="$(render::utf8_truncate_bytes "$ln" "$pv_w")"
-        fi
-        TPUT cup "$pv_line" "$pv_col" >&2
-        printf '%s' "$ln" >&2
-        pv_line=$((pv_line + 1))
-      done
-  fi
-
-  # Footer.
-  TPUT cup $((rows_lines - 1)) 2 >&2
-  printf '%bhjkl/↑↓ navigate · 1-9 quick · Enter jump · q/Esc close%b' \
-    "$COL_HINT" "$COL_RESET" >&2
-}
-
-# ---- key dispatch ----------------------------------------------------------
-#
-# Reads a single key. Returns the chosen action via the global $ACTION var:
-#   up | down | top | bottom | select | cancel | quick-N (1..9)
-read_key() {
-  local k k2 k3
-  ACTION=''
-  # Read from /dev/tty so any redirection on stdin (parent passing input via
-  # files/heredocs) does not break the read loop.
-  IFS= read -rsn1 k </dev/tty || return 1
-  case "$k" in
-    $'\033')
-      # ESC alone OR start of CSI sequence. Read 2 more bytes non-blocking.
-      IFS= read -rsn1 -t 0.05 k2 </dev/tty || {
-        ACTION='cancel'
-        return 0
-      }
-      IFS= read -rsn1 -t 0.05 k3 </dev/tty || {
-        ACTION='cancel'
-        return 0
-      }
-      case "${k2}${k3}" in
-        '[A') ACTION='up' ;;
-        '[B') ACTION='down' ;;
-        '[H') ACTION='top' ;;
-        '[F') ACTION='bottom' ;;
-        *) ACTION='cancel' ;;
-      esac
-      ;;
-    j) ACTION='down' ;;
-    k) ACTION='up' ;;
-    g) ACTION='top' ;;
-    G) ACTION='bottom' ;;
-    h | l) : ;; # reserved (no-op for single-pane list; left/right are not used yet)
-    q) ACTION='cancel' ;;
-    '') ACTION='select' ;; # Enter / RET produces empty char from read -n1
-    [1-9]) ACTION="quick-$k" ;;
-    *) : ;;
-  esac
-}
-
-# ---- main loop -------------------------------------------------------------
-while true; do
-  draw
-  read_key || break
-  case "${ACTION:-}" in
-    up) [ "$SEL" -gt 0 ] && SEL=$((SEL - 1)) ;;
-    down) [ "$SEL" -lt $((TOTAL - 1)) ] && SEL=$((SEL + 1)) ;;
-    top) SEL=0 ;;
-    bottom) SEL=$((TOTAL - 1)) ;;
-    quick-*)
-      n="${ACTION#quick-}"
-      idx=$((n - 1))
-      if [ "$idx" -lt "$TOTAL" ]; then
-        SEL="$idx"
-        # Quick-numeric ALSO selects (faster than highlighting + Enter).
-        ACTION='select'
-      fi
-      ;;
-  esac
-  case "${ACTION:-}" in
-    select)
-      sel_row="${VISIBLE_ROWS[$SEL]}"
-      pane_id="$(printf '%s' "$sel_row" | awk -F'\t' '{print $1}')"
-      if [[ "$pane_id" =~ ^%[0-9]+$ ]]; then
-        # Caller captures stdout. Print AND break the loop; cleanup trap fires.
-        printf '%s\n' "$pane_id"
-      fi
-      break
-      ;;
-    cancel) break ;;
-  esac
-done
-exit 0
+pane_id="$(printf '%s' "$sel" | cut -f1)"
+case "$pane_id" in
+  __hdr__) exit 0 ;;
+  %[0-9]*) printf '%s\n' "$pane_id" ;;
+esac

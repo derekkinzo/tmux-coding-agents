@@ -115,26 +115,22 @@ if [ -z "$sorted_pane_ids" ]; then
 fi
 
 # Hand off to the categorized TUI. The popup runs bin/inbox-popup, which:
-#   - reads $rows on stdin
+#   - reads rows from a file path (passed as argv) — NOT stdin, because the
+#     popup's stdin must be the user's keyboard so the TUI can read keys
 #   - draws a NEED/WORK/IDLE grouped picker with right-side preview
 #   - prints the chosen pane_id to its stdout (empty on cancel)
 #
-# We capture the popup's stdout via a temp file because `tmux display-popup`
-# does not stream child stdout back to the caller. After the popup closes we
-# read the file, validate the pane_id, and switch the active client.
+# We capture stdout via a redirect file because tmux display-popup does not
+# pipe the child's stdout back to the caller.
+rows_file="$(mktemp -t tca-rows.XXXXXX)"
 out_file="$(mktemp -t tca-pick.XXXXXX)"
-trap 'rm -f "$out_file"' EXIT
+trap 'rm -f "$rows_file" "$out_file"' EXIT
+printf '%s\n' "$rows" >"$rows_file"
 
-popup_cmd="cat <<'__TCA_ROWS__' | $(printf '%q' "$PLUGIN_ROOT/bin/inbox-popup") > $(printf '%q' "$out_file")
-$rows
-__TCA_ROWS__
-"
-
-# `tmux display-popup -E` runs the argument string with `sh -c`. We feed it
-# our here-doc + redirect so the popup sees $rows on stdin and writes its
-# choice to $out_file. The here-doc delimiter is unique enough that even
-# malicious row content cannot terminate it (and pane_ids are validated to
-# `^%[0-9]+$` before reaching here, so $rows is structurally safe).
+# Build the inner command. Both file paths are mktemp'd so they're shell-safe;
+# we still printf %q to be explicit. The popup binary is also %q-quoted to
+# survive any spaces in the plugin-install path.
+popup_cmd="$(printf '%q' "$PLUGIN_ROOT/bin/inbox-popup") $(printf '%q' "$rows_file") > $(printf '%q' "$out_file")"
 tmux display-popup -E -h 80% -w 90% "$popup_cmd"
 
 selected="$(tr -d '\r\n' <"$out_file" 2>/dev/null || true)"

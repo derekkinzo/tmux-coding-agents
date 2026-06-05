@@ -207,8 +207,15 @@ fi
 if command -v tmux >/dev/null 2>&1 && [ -n "${TMUX:-}" ]; then
   tmux refresh-client -S 2>/dev/null || true
   if [ "${new_state:-}" = "waiting" ] && [ "${current_state:-}" != "waiting" ]; then
-    proj_msg="${local_project:-pane $pane_id}"
-    tmux display-message "tmux-coding-agents: $proj_msg needs you" 2>/dev/null || true
+    # SECURITY: tmux display-message parses its argument as a FORMAT string,
+    # so any `#` from a project name would be interpreted as a format
+    # introducer (`#(...)` would shell-execute). Double every `#` before
+    # composing the message — this is the same defense lib/render.sh
+    # applies anywhere LLM-controlled text reaches a tmux format context.
+    proj_safe="${local_project:-}"
+    proj_safe="${proj_safe//\#/##}"
+    [ -z "$proj_safe" ] && proj_safe="pane $pane_id"
+    tmux display-message "tmux-coding-agents: $proj_safe needs you" 2>/dev/null || true
   fi
 fi
 

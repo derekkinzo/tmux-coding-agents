@@ -458,5 +458,5 @@ Disposition: **bump `schema_version` and gate transitions on it.** `lib/transiti
 
 ---
 
-Implementers ship from this document. The GO ARCH proposal is archived; if a daemon is reintroduced in a future major version, it gets its own design review against this baseline. Source files live at `/home/ANT.AMAZON.COM/dkinzo/Projects/tmux-coding-agents/docs/ARCHITECTURE.md` (decision log, canonical) and the new design doc to be saved at `/home/ANT.AMAZON.COM/dkinzo/Projects/tmux-coding-agents/docs/DESIGN.md`.
+Implementers ship from this document. If a daemon-based architecture is reintroduced in a future major version, it gets its own design review against this baseline. Companion document: `docs/ARCHITECTURE.md` (decision log, canonical).
 

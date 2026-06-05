@@ -26,19 +26,21 @@
 #   └────────────────────────────────────────────────────┘
 #
 # Inputs:
-#   stdin                — TSV rows (without header), one per tracked pane,
-#                          7 columns: pane_id kind status since_epoch pid
-#                          project transcript_path
+#   $1                   — path to a file holding the TSV rows (no header),
+#                          one per tracked pane, 7 columns: pane_id kind
+#                          status since_epoch pid project transcript_path
 #   stdout               — selected pane_id on Enter; empty on cancel
 #   stderr               — drawing output (the popup terminal)
+#   /dev/tty             — keystrokes (the TUI reads keys from /dev/tty so
+#                          stdin redirection does not interfere)
 #
 # Implementation notes:
 #   - Pure bash + ANSI (no fzf, no python). Keeps the runtime dependency
 #     surface minimal and matches the rest of the plugin.
 #   - Terminal-control via `tput` when present (portable across BSD/Linux).
 #     Falls back to literal ANSI when `tput` is absent.
-#   - Read keys with `read -rsn1`; multi-byte sequences (arrows) are caught
-#     by an additional non-blocking read for the bracket and the letter.
+#   - Read keys with `read -rsn1` from /dev/tty; multi-byte sequences (arrows)
+#     are caught by an additional non-blocking read for the bracket and letter.
 
 set -uo pipefail
 
@@ -81,7 +83,12 @@ cleanup() {
 trap cleanup EXIT
 
 # ---- read input -------------------------------------------------------------
-rows="$(cat)"
+rows_file="${1:-}"
+if [ -z "$rows_file" ] || [ ! -r "$rows_file" ]; then
+  printf 'inbox-popup: rows-file path missing or unreadable: %s\n' "${rows_file:-<empty>}" >&2
+  exit 1
+fi
+rows="$(cat "$rows_file")"
 if [ -z "$rows" ]; then
   printf 'no Claude sessions tracked yet\n' >&2
   exit 0
@@ -272,15 +279,17 @@ draw() {
 read_key() {
   local k k2 k3
   ACTION=''
-  IFS= read -rsn1 k || return 1
+  # Read from /dev/tty so any redirection on stdin (parent passing input via
+  # files/heredocs) does not break the read loop.
+  IFS= read -rsn1 k </dev/tty || return 1
   case "$k" in
     $'\033')
       # ESC alone OR start of CSI sequence. Read 2 more bytes non-blocking.
-      IFS= read -rsn1 -t 0.05 k2 || {
+      IFS= read -rsn1 -t 0.05 k2 </dev/tty || {
         ACTION='cancel'
         return 0
       }
-      IFS= read -rsn1 -t 0.05 k3 || {
+      IFS= read -rsn1 -t 0.05 k3 </dev/tty || {
         ACTION='cancel'
         return 0
       }

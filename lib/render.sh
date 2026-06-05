@@ -158,7 +158,7 @@ render::status() {
   printf '#[fg=%s,bold]NEED %d#[default]  #[fg=%s]WORK %d#[default]  #[fg=%s]IDLE %d#[default]' \
     "$RENDER_COLOR_WAITING" "$waiting" \
     "$RENDER_COLOR_WORKING" "$working" \
-    "$RENDER_COLOR_IDLE"    "$idle"
+    "$RENDER_COLOR_IDLE" "$idle"
 }
 
 # --- picker row -------------------------------------------------------------

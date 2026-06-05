@@ -60,7 +60,7 @@ counts="$(state::read 2>/dev/null \
 IFS=$'\t' read -r waiting working idle <<<"$counts"
 case "$waiting" in *[!0-9]* | '') waiting=0 ;; esac
 case "$working" in *[!0-9]* | '') working=0 ;; esac
-case "$idle"    in *[!0-9]* | '') idle=0 ;; esac
+case "$idle" in *[!0-9]* | '') idle=0 ;; esac
 
 # Optional user-defined format. When @inbox-status-format is set, render::status
 # substitutes {NEED}/{WORK}/{IDLE}/{TOTAL} placeholders and emits the template

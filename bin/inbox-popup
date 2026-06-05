@@ -133,20 +133,21 @@ TOTAL=${#VISIBLE_ROWS[@]}
 ICON_NEED='!'
 ICON_WORK='▶'
 ICON_IDLE='·'
-COL_NEED='\033[1;31m'  # bold red — Wong vermillion #dc322f approximated
-COL_WORK='\033[33m'    # orange (terminal yellow tone)
-COL_IDLE='\033[90m'    # bright black / grey
-COL_HEAD='\033[1m'     # bold
-COL_HINT='\033[2m'     # dim
+COL_NEED='\033[1;31m' # bold red — Wong vermillion #dc322f approximated
+COL_WORK='\033[33m'   # orange (terminal yellow tone)
+COL_IDLE='\033[90m'   # bright black / grey
+COL_HEAD='\033[1m'    # bold
+COL_HINT='\033[2m'    # dim
 COL_RESET='\033[0m'
 
 # ---- selection state -------------------------------------------------------
-SEL=0  # index into VISIBLE_ROWS
+SEL=0 # index into VISIBLE_ROWS
 
 # ---- render::ago is sourced; expose a simple wrapper -----------------------
 fmt_age() {
   local since="$1"
-  local now; now="$(date +%s)"
+  local now
+  now="$(date +%s)"
   render::ago "$((now - since))"
 }
 
@@ -227,7 +228,7 @@ draw() {
       line=$((line + 1))
       row_idx=$((row_idx + 1))
     done <<<"$rows_text"
-    line=$((line + 1))  # blank between sections
+    line=$((line + 1)) # blank between sections
   }
 
   draw_section "NEED" "$NEED_ROWS" "$COL_NEED" "$ICON_NEED"
@@ -247,15 +248,15 @@ draw() {
     local pv_line=4 ln
     preview_for "$sel_tpath" "$pv_lines" \
       | while IFS= read -r ln; do
-          [ "$pv_line" -ge $((rows_lines - 2)) ] && break
-          # Truncate to preview width.
-          if [ "${#ln}" -gt "$pv_w" ]; then
-            ln="$(render::utf8_truncate_bytes "$ln" "$pv_w")"
-          fi
-          TPUT cup "$pv_line" "$pv_col" >&2
-          printf '%s' "$ln" >&2
-          pv_line=$((pv_line + 1))
-        done
+        [ "$pv_line" -ge $((rows_lines - 2)) ] && break
+        # Truncate to preview width.
+        if [ "${#ln}" -gt "$pv_w" ]; then
+          ln="$(render::utf8_truncate_bytes "$ln" "$pv_w")"
+        fi
+        TPUT cup "$pv_line" "$pv_col" >&2
+        printf '%s' "$ln" >&2
+        pv_line=$((pv_line + 1))
+      done
   fi
 
   # Footer.
@@ -275,8 +276,14 @@ read_key() {
   case "$k" in
     $'\033')
       # ESC alone OR start of CSI sequence. Read 2 more bytes non-blocking.
-      IFS= read -rsn1 -t 0.05 k2 || { ACTION='cancel'; return 0; }
-      IFS= read -rsn1 -t 0.05 k3 || { ACTION='cancel'; return 0; }
+      IFS= read -rsn1 -t 0.05 k2 || {
+        ACTION='cancel'
+        return 0
+      }
+      IFS= read -rsn1 -t 0.05 k3 || {
+        ACTION='cancel'
+        return 0
+      }
       case "${k2}${k3}" in
         '[A') ACTION='up' ;;
         '[B') ACTION='down' ;;
@@ -289,9 +296,9 @@ read_key() {
     k) ACTION='up' ;;
     g) ACTION='top' ;;
     G) ACTION='bottom' ;;
-    h | l) : ;;  # reserved (no-op for single-pane list; left/right are not used yet)
+    h | l) : ;; # reserved (no-op for single-pane list; left/right are not used yet)
     q) ACTION='cancel' ;;
-    '') ACTION='select' ;;  # Enter / RET produces empty char from read -n1
+    '') ACTION='select' ;; # Enter / RET produces empty char from read -n1
     [1-9]) ACTION="quick-$k" ;;
     *) : ;;
   esac

@@ -146,13 +146,15 @@ _state_with_lock() {
   fi
 
   # Try to acquire the lock. The timeout is short (200ms) per DESIGN §5.4
-  # to avoid blocking Claude/tmux for any user-perceptible amount of time;
-  # a couple of -n retries with short sleeps absorb the burst when many
-  # writers hit at once.
+  # to avoid blocking the caller for any user-perceptible amount of time;
+  # several -n retries with short jittered sleeps absorb the burst when
+  # many writers hit at once. Total worst-case wait: ~1.8s (8 * 200ms +
+  # ~200ms cumulative backoff), well within the caller's tolerance for an
+  # event-driven workload.
   local attempts=0
   while ! flock -w "$STATE_LOCK_TIMEOUT_SECS" "$mode" "$lock_fd"; do
     attempts=$((attempts + 1))
-    if [ "$attempts" -ge 3 ]; then
+    if [ "$attempts" -ge 8 ]; then
       eval "exec ${lock_fd}>&-"
       return 3
     fi

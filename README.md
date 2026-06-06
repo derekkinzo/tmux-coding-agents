@@ -13,32 +13,42 @@ prefix + a    →  picker:  ! laptop-opt        2m
 
 ## Install
 
-Three steps with [TPM](https://github.com/tmux-plugins/tpm):
+### 1. Install the plugin via [TPM](https://github.com/tmux-plugins/tpm)
+
+Add to `~/.tmux.conf`:
 
 ```tmux
-# in ~/.tmux.conf
 set -g @plugin 'derekkinzo/tmux-coding-agents'
 ```
 
-```sh
-# inside tmux
-prefix + I
+Then, inside tmux, press `prefix + I` to fetch.
 
-# one-shot, wires Claude Code hooks into ~/.claude/settings.json
+### 2. Wire Claude Code hooks (one-time)
+
+This step requires `jq`. From a regular shell:
+
+```sh
 ~/.tmux/plugins/tmux-coding-agents/bin/install-hooks
 ```
 
-Add the status segment somewhere in your `status-right`:
+The installer adds entries to `~/.claude/settings.json` so Claude Code
+sends events to this plugin. It's idempotent — safe to re-run.
+
+### 3. (Optional) Add the status segment to your status bar
 
 ```tmux
 set -ag status-right ' #(~/.tmux/plugins/tmux-coding-agents/bin/inbox-status)'
 ```
 
+The leading space is a separator. tmux refreshes `#(...)` segments on
+its `status-interval` cadence (default 15s — set `set -g status-interval 5`
+for snappier updates).
+
 ## Usage
 
 | Keybind | Action |
 |---|---|
-| `prefix + a` | Open the picker (fzf-driven). Type to filter; j/k or arrows to navigate; Enter to jump; `?` toggles preview; Esc closes. |
+| `prefix + a` | Open the picker (fzf-driven). Type to filter; j/k or arrows to navigate; Enter to jump; Esc closes. |
 | `prefix + <next-key>` (opt-in) | Jump to next waiting pane without opening the picker. |
 
 The plugin tracks every interactive `claude` REPL running in a tmux pane.
@@ -57,11 +67,10 @@ States: **waiting** (red `!`) → needs your input now; **working** (orange `▶
 
 ## Requirements
 
-tmux 3.2+, bash 3.2+, Claude Code, plus two small CLI tools the picker
-relies on:
+tmux 3.2+, bash 3.2+, Claude Code, plus two small CLI tools:
 
-- `jq` for safe JSON parsing of hook payloads
-- `fzf` for the picker's selection UI and live preview window
+- `jq` — safe JSON parsing of hook payloads (also required by `install-hooks`)
+- `fzf >= 0.20` — picker selection UI
 
 Install on Linux: `apt install jq fzf` (or `dnf` / `apk`).
 Install on macOS: `brew install jq fzf`.

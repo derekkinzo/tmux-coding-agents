@@ -51,14 +51,6 @@ make_rows() {
       --layout=reverse \
       --prompt='agents> ' \
       --pointer='›' \
-      --bind='?:toggle-preview' \
-      --bind='down:down+transform([ "{1}" = "__hdr__" ] && echo down)' \
-      --bind='up:up+transform([ "{1}" = "__hdr__" ] && echo up)' \
-      --bind='j:down+transform([ "{1}" = "__hdr__" ] && echo down)' \
-      --bind='k:up+transform([ "{1}" = "__hdr__" ] && echo up)' \
-      --bind='ctrl-n:down+transform([ "{1}" = "__hdr__" ] && echo down)' \
-      --bind='ctrl-p:up+transform([ "{1}" = "__hdr__" ] && echo up)' \
-      --bind='start:first+transform([ "{1}" = "__hdr__" ] && echo down)' \
       --bind='ctrl-c:abort' \
       >/dev/null 2>"$err"
   rc=$?
@@ -78,6 +70,20 @@ make_rows() {
     echo "fzf rejected a --bind action (parse error)"
     echo "--- stderr ---"
     cat "$err"
+    return 1
+  fi
+}
+
+@test "inbox-popup builds NO decorator rows: every candidate is a real pane_id" {
+  # Regression guard: fzf has no concept of non-selectable rows, so the
+  # picker must not contain any __hdr__ / decorator entries. If a future
+  # change reintroduces them, this test catches it.
+  if ! grep -qE 'printf .__hdr__\\t' "$BIN/inbox-popup"; then
+    : # OK: source contains no header-row emitter
+  else
+    echo "bin/inbox-popup contains __hdr__ row emission. fzf cannot make"
+    echo "rows non-selectable; decorator rows must not be in the candidate list."
+    grep -nE '__hdr__' "$BIN/inbox-popup"
     return 1
   fi
 }

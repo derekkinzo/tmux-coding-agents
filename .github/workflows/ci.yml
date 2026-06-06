@@ -58,7 +58,19 @@ jobs:
 
       - name: Install runtime deps (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update -y && sudo apt-get install -y jq fzf util-linux tmux
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq util-linux tmux
+          # Ubuntu's apt fzf can be older than 0.46 (the floor we require).
+          # Pull a recent fzf release tarball to a user-writable dir.
+          FZF_VER=0.55.0
+          curl -fsSL -o /tmp/fzf.tgz \
+            "https://github.com/junegunn/fzf/releases/download/v${FZF_VER}/fzf-${FZF_VER}-linux_amd64.tar.gz"
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf /tmp/fzf.tgz -C "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/fzf"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/fzf" --version
 
       - name: Install runtime deps (macOS)
         if: runner.os == 'macOS'

@@ -52,8 +52,13 @@ make_rows() {
       --prompt='agents> ' \
       --pointer='›' \
       --bind='?:toggle-preview' \
-      --bind='j:down' \
-      --bind='k:up' \
+      --bind='down:down+transform([ "{1}" = "__hdr__" ] && echo down)' \
+      --bind='up:up+transform([ "{1}" = "__hdr__" ] && echo up)' \
+      --bind='j:down+transform([ "{1}" = "__hdr__" ] && echo down)' \
+      --bind='k:up+transform([ "{1}" = "__hdr__" ] && echo up)' \
+      --bind='ctrl-n:down+transform([ "{1}" = "__hdr__" ] && echo down)' \
+      --bind='ctrl-p:up+transform([ "{1}" = "__hdr__" ] && echo up)' \
+      --bind='start:first+transform([ "{1}" = "__hdr__" ] && echo down)' \
       --bind='ctrl-c:abort' \
       >/dev/null 2>"$err"
   rc=$?

@@ -170,8 +170,13 @@ sel="$(printf '%s\n' "$input" \
     --preview="bash $(printf '%q' "$PLUGIN_ROOT/bin/inbox-preview") {1}" \
     --preview-window='right:55%:wrap' \
     --bind='?:toggle-preview' \
-    --bind='j:down' \
-    --bind='k:up' \
+    --bind='down:down+transform([ "{1}" = "__hdr__" ] && echo down)' \
+    --bind='up:up+transform([ "{1}" = "__hdr__" ] && echo up)' \
+    --bind='j:down+transform([ "{1}" = "__hdr__" ] && echo down)' \
+    --bind='k:up+transform([ "{1}" = "__hdr__" ] && echo up)' \
+    --bind='ctrl-n:down+transform([ "{1}" = "__hdr__" ] && echo down)' \
+    --bind='ctrl-p:up+transform([ "{1}" = "__hdr__" ] && echo up)' \
+    --bind='start:first+transform([ "{1}" = "__hdr__" ] && echo down)' \
     --bind='ctrl-c:abort' \
     2>"$fzf_err")"
 fzf_rc=$?

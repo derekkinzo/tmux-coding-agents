@@ -102,18 +102,20 @@ now_epoch="$(date +%s)"
 
 # ---- build the fzf input --------------------------------------------------
 #
-# Each line is TAB-separated, two columns:
-#   col 1: pane_id (always a real, selectable agent)
-#   col 2: ANSI-colored display text
+# Each line is space-separated and starts with the pane_id, then a colored
+# state glyph, project name (UTF-8-safe truncated), and age. The pane_id is
+# visible to the user (useful as a stable identifier) and we extract it from
+# the selected line on Enter.
 #
-# fzf is invoked with --with-nth=2.. so col 1 is hidden from the visible
-# list but addressable via {1} in --preview. There are NO decorator rows
-# in the candidate list — fzf has no concept of non-selectable rows, so
-# the picker simply does not contain any.
+# We deliberately do NOT use `fzf --with-nth=N..` to hide the pane_id:
+# `--with-nth` semantics differ across fzf versions (0.44 strips col 1 from
+# selection output as well as from display, breaking the post-selection path;
+# 0.46+ separated display from output via --accept-nth). Keeping the pane_id
+# in the visible row sidesteps the version dependency entirely.
 #
-# Section grouping is preserved via sort order: waiting first (newest
-# first within the section), then working (newest first), then idle. The
-# colored glyph at the start of each row encodes the state at a glance.
+# Section grouping is preserved via sort order: waiting first (newest first
+# within the section), then working (newest first), then idle. The colored
+# glyph at the start of each row encodes the state at a glance.
 build_fzf_input() {
   local target="$1" color="$2" icon="$3"
   local section_rows
@@ -130,10 +132,13 @@ build_fzf_input() {
     case "$since" in '' | *[!0-9]*) since=0 ;; esac
     age="$(render::ago "$((now_epoch - since))")"
     proj_disp="$(printf '%s' "$project" | render::scrub_ansi)"
-    if [ "${#proj_disp}" -gt 45 ]; then
-      proj_disp="$(render::utf8_truncate_bytes "$proj_disp" 44)…"
+    if [ "${#proj_disp}" -gt 40 ]; then
+      proj_disp="$(render::utf8_truncate_bytes "$proj_disp" 39)…"
     fi
-    printf '%s\t  \033[%sm%s\033[0m  %-45s  %s\n' \
+    # Format: "<pane_id>  <icon>  <project>  <age>"
+    # Pane_id is left-padded to 6 chars so the columns align across all
+    # tracked panes (most are 2-4 chars; reserve up to %99999).
+    printf '%-6s \033[%sm%s\033[0m  %-40s  %s\n' \
       "$pane_id" "$color" "$icon" "$proj_disp" "$age"
   done <<<"$section_rows"
 }
@@ -168,8 +173,6 @@ set +e
 sel="$(printf '%s\n' "$input" \
   | "$FZF_BIN" \
     --ansi \
-    --delimiter=$'\t' \
-    --with-nth='2..' \
     --no-sort \
     --layout=reverse \
     --prompt='agents> ' \
@@ -200,8 +203,12 @@ if [ -s "$fzf_err" ]; then
 fi
 
 # ---- post-process the selection -------------------------------------------
+#
+# Selected line shape: "<pane_id>  <icon>  <project>  <age>"
+# Extract the pane_id (first whitespace-separated token) and emit it on
+# stdout so the caller (bin/inbox-pick) can switch-client to it.
 [ -n "$sel" ] || exit 0
-pane_id="$(printf '%s' "$sel" | cut -f1)"
+pane_id="$(printf '%s' "$sel" | awk '{print $1}')"
 case "$pane_id" in
   %[0-9]*) printf '%s\n' "$pane_id" ;;
 esac

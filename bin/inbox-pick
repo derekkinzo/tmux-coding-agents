@@ -122,8 +122,11 @@ fi
 #
 # We capture stdout via a redirect file because tmux display-popup does not
 # pipe the child's stdout back to the caller.
-rows_file="$(mktemp -t tca-rows.XXXXXX)"
-out_file="$(mktemp -t tca-pick.XXXXXX)"
+# mktemp without -t (portable across BSD/macOS and GNU). BSD mktemp's -t
+# treats the suffix as a prefix; GNU's -t selects $TMPDIR. The explicit
+# template form works identically on both.
+rows_file="$(mktemp "${TMPDIR:-/tmp}/tca-rows.XXXXXX")"
+out_file="$(mktemp "${TMPDIR:-/tmp}/tca-pick.XXXXXX")"
 trap 'rm -f "$rows_file" "$out_file"' EXIT
 printf '%s\n' "$rows" >"$rows_file"
 

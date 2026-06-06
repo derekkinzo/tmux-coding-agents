@@ -3,23 +3,32 @@
 #
 # Reads tracked-pane rows from a file path (argv[1]) and runs fzf with a
 # state-grouped list and a live capture-pane preview on the right. On Enter
-# the selected pane_id is printed to stdout. Esc / Ctrl-C cancels with
-# empty stdout. The caller (bin/inbox-pick) interprets empty stdout as
-# "user cancelled".
+# the selected pane_id is printed to stdout. Esc / Ctrl-C cancels with empty
+# stdout. The caller (bin/inbox-pick) interprets empty stdout as "user
+# cancelled".
 #
-# Why fzf rather than a hand-rolled bash TUI:
-#   fzf provides typeahead filtering, native arrow/hjkl navigation, mouse,
-#   prompt + footer, an async preview window with toggle, and consistent
-#   theming via FZF_DEFAULT_OPTS. Reimplementing those primitives in pure
-#   bash produces a worse UX in much more code.
+# fzf binary discovery:
+#   The PATH inside `tmux display-popup -E` may resolve `fzf` to an old
+#   distro package whose feature set predates what this picker needs. Some
+#   shells used by tmux do not export the user's interactive PATH at all.
+#   To make behavior deterministic, this script resolves fzf explicitly:
+#     1. $FZF_BIN env override (escape hatch)
+#     2. command -v fzf  (caller's PATH)
+#     3. ~/.local/bin/fzf
+#     4. /opt/homebrew/bin/fzf, /usr/local/bin/fzf  (macOS / hand-installed)
+#   The first executable found whose --version is >= 0.46 wins. 0.46 is the
+#   floor because this picker uses the parenthesized transform(...) action
+#   form added in that release.
 #
 # Inputs:
 #   $1                 — path to a file holding the TSV rows (no header),
 #                        7 columns: pane_id kind status since_epoch pid
 #                        project transcript_path
 #   stdout             — selected pane_id on Enter; empty on cancel
+#   stderr             — fzf stderr is forwarded so user-visible errors
+#                        surface instead of flickering silently
 #
-# Required tools: fzf, tmux, awk, sort.
+# Required tools: fzf >= 0.46, tmux, awk, sort.
 
 set -uo pipefail
 
@@ -27,25 +36,74 @@ PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/render.sh"
 
-if ! command -v fzf >/dev/null 2>&1; then
-  printf 'inbox-popup: fzf is required (https://github.com/junegunn/fzf)\n' >&2
-  exit 1
+# ---- fzf binary discovery + version pin -----------------------------------
+#
+# Returns 0 if $1 is a runnable fzf >= 0.46, 1 otherwise. Version compare is
+# numeric major*1000 + minor; we tolerate 0.46.x through 0.99.x and 1.0+.
+_fzf_version_ok() {
+  local bin="$1" ver maj min
+  [ -n "$bin" ] && [ -x "$bin" ] || return 1
+  ver="$("$bin" --version 2>/dev/null | awk '{print $1; exit}')"
+  case "$ver" in
+    [0-9]*.[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  maj="${ver%%.*}"
+  min="${ver#*.}"
+  min="${min%%.*}"
+  case "$maj" in *[!0-9]*) return 1 ;; esac
+  case "$min" in *[!0-9]*) return 1 ;; esac
+  if [ "$maj" -gt 0 ]; then return 0; fi
+  if [ "$min" -ge 46 ]; then return 0; fi
+  return 1
+}
+
+# Preserve any inherited FZF_BIN as the first candidate (escape hatch).
+# We hold it in a separate var so the discovery loop can populate FZF_BIN
+# without clobbering the user-provided override before we get to read it.
+_fzf_override="${FZF_BIN:-}"
+FZF_BIN=""
+for cand in \
+  "$_fzf_override" \
+  "$(command -v fzf 2>/dev/null || true)" \
+  "$HOME/.local/bin/fzf" \
+  "/opt/homebrew/bin/fzf" \
+  "/usr/local/bin/fzf"; do
+  if _fzf_version_ok "$cand"; then
+    FZF_BIN="$cand"
+    break
+  fi
+done
+
+if [ -z "$FZF_BIN" ]; then
+  printf 'inbox-popup: no fzf >= 0.46 found on PATH or in standard locations.\n' >&2
+  printf '  Install fzf 0.46+ (apt install fzf, brew install fzf, or download a\n' >&2
+  printf '  newer release from https://github.com/junegunn/fzf/releases).\n' >&2
+  printf '  You can override binary discovery with: FZF_BIN=/path/to/fzf\n' >&2
+  exit 2
 fi
 
 rows_file="${1:-}"
 if [ -z "$rows_file" ] || [ ! -r "$rows_file" ]; then
-  printf 'inbox-popup: rows-file path missing or unreadable\n' >&2
+  printf 'inbox-popup: rows-file path missing or unreadable: %s\n' \
+    "${rows_file:-<empty>}" >&2
   exit 1
 fi
 
 now_epoch="$(date +%s)"
 
-# Build the fzf input. Each line is TAB-separated:
-#   col 1: pane_id (or '__hdr__' for section headers)
-#   col 2: rendered display text (already ANSI-colored where appropriate)
+# ---- build the fzf input --------------------------------------------------
 #
-# fzf is invoked with --with-nth=2.. so col 1 is hidden but available via
-# {1} in --preview / --bind transforms.
+# Each line is TAB-separated, two columns:
+#   col 1: pane_id, or the literal string __hdr__ for visual section breaks
+#   col 2: ANSI-colored display text
+#
+# fzf is invoked with --with-nth=2.. so col 1 is hidden from the visible
+# list but addressable via {1} in --preview. Section-header rows are not
+# selectable: enter on a header is filtered out at the post-fzf layer
+# (line at the end of this script). We deliberately do NOT use a fzf
+# --bind action to filter headers — that path historically created
+# parser-fragility bugs across fzf versions.
 build_fzf_input() {
   local target="$1" label="$2" color="$3" icon="$4"
   local section_rows
@@ -56,16 +114,13 @@ build_fzf_input() {
   if [ -z "$section_rows" ]; then
     return 0
   fi
-  # Section header.
   printf '__hdr__\t\033[1;%sm%s\033[0m\n' "$color" "$label"
-  # Rows.
   while IFS=$'\t' read -r pane_id _kind _status since _pid project _tpath; do
     [ -n "$pane_id" ] || continue
     local age proj_disp
     case "$since" in '' | *[!0-9]*) since=0 ;; esac
     age="$(render::ago "$((now_epoch - since))")"
     proj_disp="$(printf '%s' "$project" | render::scrub_ansi)"
-    # Truncate project to a stable width (45 bytes) for column alignment.
     if [ "${#proj_disp}" -gt 45 ]; then
       proj_disp="$(render::utf8_truncate_bytes "$proj_disp" 44)…"
     fi
@@ -85,12 +140,21 @@ if [ -z "$input" ]; then
   exit 0
 fi
 
-# fzf options. Bind enter:transform so selecting a section header is a no-op
-# (fzf sees `ignore` and stays open). j/k/arrows navigate; q only triggers
-# fzf's filter, so we add --bind=q:abort for an explicit exit. The preview
-# script is invoked per-row with the pane_id.
+# ---- run fzf --------------------------------------------------------------
+#
+# Run fzf and capture its stdout. We deliberately do NOT use `|| true`:
+# masking fzf's exit code hides parse errors and produces the silent-flicker
+# failure mode that the user observed. We accept three exit codes:
+#   0   — selection made
+#   1   — no match (e.g. user filtered to nothing then hit enter)
+#   130 — user cancelled with Esc / Ctrl-C
+# Any other code is a real fzf failure — surface it.
+fzf_err="$(mktemp)"
+trap 'rm -f "$fzf_err"' EXIT
+
+set +e
 sel="$(printf '%s\n' "$input" \
-  | fzf \
+  | "$FZF_BIN" \
     --ansi \
     --delimiter=$'\t' \
     --with-nth='2..' \
@@ -103,12 +167,34 @@ sel="$(printf '%s\n' "$input" \
     --preview="bash $(printf '%q' "$PLUGIN_ROOT/bin/inbox-preview") {1}" \
     --preview-window='right:55%:wrap' \
     --bind='?:toggle-preview' \
-    --bind='enter:transform:[ {1} = __hdr__ ] && echo ignore || echo accept' \
     --bind='j:down' \
     --bind='k:up' \
     --bind='ctrl-c:abort' \
-  || true)"
+    2>"$fzf_err")"
+fzf_rc=$?
+set -e
 
+case "$fzf_rc" in
+  0 | 1 | 130) : ;;
+  *)
+    printf 'inbox-popup: fzf exited rc=%d\n' "$fzf_rc" >&2
+    cat "$fzf_err" >&2
+    exit "$fzf_rc"
+    ;;
+esac
+
+# Always forward fzf stderr to ours: even on rc=0 fzf may have printed
+# warnings (e.g. terminal capability mismatches) that the user benefits
+# from seeing in @inbox-debug logs.
+if [ -s "$fzf_err" ]; then
+  cat "$fzf_err" >&2
+fi
+
+# ---- post-process the selection -------------------------------------------
+#
+# A section-header row is non-selectable from the user's perspective, but
+# fzf will happily return it on Enter. Filter it here: __hdr__ → exit 0
+# with empty stdout, treated as "user cancelled" by the caller.
 [ -n "$sel" ] || exit 0
 
 pane_id="$(printf '%s' "$sel" | cut -f1)"

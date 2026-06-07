@@ -51,8 +51,12 @@ make_rows() {
       --layout=reverse \
       --prompt='agents> ' \
       --pointer='›' \
+      --cycle \
+      --disabled \
       --bind='j:down' \
       --bind='k:up' \
+      --bind='/:enable-search' \
+      --bind='esc:transform([ -n {q} ] && echo disable-search+clear-query || echo abort)' \
       --bind='ctrl-c:abort' \
       >/dev/null 2>"$err"
   rc=$?

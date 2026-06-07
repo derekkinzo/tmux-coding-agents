@@ -51,6 +51,8 @@ make_rows() {
       --layout=reverse \
       --prompt='agents> ' \
       --pointer='›' \
+      --bind='j:down' \
+      --bind='k:up' \
       --bind='ctrl-c:abort' \
       >/dev/null 2>"$err"
   rc=$?

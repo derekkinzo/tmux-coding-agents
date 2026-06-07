@@ -177,7 +177,7 @@ fzf_err="$(mktemp)"
 trap 'rm -f "$fzf_err"' EXIT
 
 # Header legend: colored glyphs documenting state mapping, then keybind hints.
-HEADER=$'\033[1;31m! NEED\033[0m  \033[1;33m▶ WORK\033[0m  \033[0;90m· IDLE\033[0m   enter: jump · esc: close'
+HEADER=$'\033[1;31m! NEED\033[0m  \033[1;33m▶ WORK\033[0m  \033[0;90m· IDLE\033[0m   j/k: nav · enter: jump · esc: close'
 
 set +e
 sel="$(printf '%s\n' "$input" \
@@ -191,6 +191,8 @@ sel="$(printf '%s\n' "$input" \
     --header-first \
     --preview="bash $(printf '%q' "$PLUGIN_ROOT/bin/inbox-preview") {1}" \
     --preview-window='right:55%:wrap' \
+    --bind='j:down' \
+    --bind='k:up' \
     --bind='ctrl-c:abort' \
     2>"$fzf_err")"
 fzf_rc=$?

@@ -22,8 +22,10 @@
 #     2. command -v fzf  (caller's PATH)
 #     3. ~/.local/bin/fzf
 #     4. /opt/homebrew/bin/fzf, /usr/local/bin/fzf  (macOS / hand-installed)
-#   The first executable with version >= 0.20 wins. 0.20 is the floor
-#   because the picker uses --with-nth=N..M (added in 0.20).
+#   The first executable with version >= 0.50 wins. Earlier 0.4x releases
+#   (e.g. fzf 0.44 shipped by Debian/Ubuntu 24.04) have rendering issues
+#   with this picker inside tmux display-popup — the candidate list draws
+#   blank.
 #
 # Inputs:
 #   $1                 — path to a file holding the TSV rows (no header),
@@ -33,7 +35,7 @@
 #   stderr             — fzf stderr is forwarded so user-visible errors
 #                        surface instead of flickering silently
 #
-# Required tools: fzf >= 0.20, tmux, awk, sort.
+# Required tools: fzf >= 0.50, tmux, awk, sort.
 
 set -uo pipefail
 
@@ -43,8 +45,14 @@ PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # ---- fzf binary discovery + version pin -----------------------------------
 #
-# Returns 0 if $1 is a runnable fzf >= 0.20, 1 otherwise. Version compare
-# treats anything with major >= 1 as ok and major == 0 with minor >= 20.
+# Returns 0 if $1 is a runnable fzf >= 0.50, 1 otherwise. Version compare
+# treats anything with major >= 1 as ok and major == 0 with minor >= 50.
+#
+# Floor is 0.50 because earlier 0.4x releases (e.g. fzf 0.44 shipped by
+# Debian/Ubuntu 24.04) have rendering problems with our flag combo inside
+# `tmux display-popup -E` — the popup opens but the candidate list draws
+# blank. fzf 0.50+ rendered the same input correctly in side-by-side
+# tests.
 _fzf_version_ok() {
   local bin="$1" ver maj min
   [ -n "$bin" ] && [ -x "$bin" ] || return 1
@@ -59,7 +67,7 @@ _fzf_version_ok() {
   case "$maj" in *[!0-9]*) return 1 ;; esac
   case "$min" in *[!0-9]*) return 1 ;; esac
   if [ "$maj" -gt 0 ]; then return 0; fi
-  if [ "$min" -ge 20 ]; then return 0; fi
+  if [ "$min" -ge 50 ]; then return 0; fi
   return 1
 }
 
@@ -91,10 +99,12 @@ for cand in \
 done
 
 if [ -z "$FZF_BIN" ]; then
-  printf 'inbox-popup: no fzf >= 0.20 found on PATH or in standard locations.\n' >&2
-  printf '  Install fzf 0.20+ (apt install fzf, brew install fzf, or download a\n' >&2
-  printf '  release from https://github.com/junegunn/fzf/releases).\n' >&2
-  printf '  You can override binary discovery with: FZF_BIN=/path/to/fzf\n' >&2
+  printf 'inbox-popup: no fzf >= 0.50 found.\n' >&2
+  printf '  Install a recent fzf (brew install fzf, or download a release from\n' >&2
+  printf '  https://github.com/junegunn/fzf/releases). Distro packages older\n' >&2
+  printf '  than 0.50 (e.g. Ubuntu 24.04 ships 0.44) have rendering issues with\n' >&2
+  printf '  this picker inside tmux display-popup.\n' >&2
+  printf '  Override discovery with: FZF_BIN=/path/to/fzf\n' >&2
   exit 2
 fi
 

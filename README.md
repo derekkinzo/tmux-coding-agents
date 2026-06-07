@@ -70,10 +70,14 @@ States: **waiting** (red `!`) → needs your input now; **working** (orange `▶
 tmux 3.2+, bash 3.2+, Claude Code, plus two small CLI tools:
 
 - `jq` — safe JSON parsing of hook payloads (also required by `install-hooks`)
-- `fzf >= 0.20` — picker selection UI
+- `fzf >= 0.50` — picker selection UI. Distro fzf packages older than 0.50
+  (notably Ubuntu 24.04 / Debian's 0.44) have rendering issues inside tmux
+  display-popup; the picker will hard-error rather than draw a blank popup.
 
-Install on Linux: `apt install jq fzf` (or `dnf` / `apk`).
-Install on macOS: `brew install jq fzf`.
+Install on macOS: `brew install jq fzf` (Homebrew tracks recent fzf).
+Install on Linux: `apt install jq` for jq, then grab a recent fzf from
+[releases](https://github.com/junegunn/fzf/releases) — set
+`FZF_BIN=/path/to/fzf` if it's not on `PATH`.
 
 To target a non-default settings file, set `CLAUDE_SETTINGS=/path/to/settings.json`
 before running `install-hooks`. Symlinked settings files are preserved.

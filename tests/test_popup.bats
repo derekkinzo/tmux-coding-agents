@@ -53,10 +53,21 @@ make_rows() {
       --pointer='›' \
       --cycle \
       --no-input \
-      --bind='/:show-input+enable-search' \
+      --with-nth=1 \
+      --accept-nth=2 \
+      --bind='/:show-input+enable-search+unbind(j,k,1,2,3,4,5,6,7,8,9)' \
       --bind='j:down' \
       --bind='k:up' \
-      --bind='esc:transform([ "$FZF_INPUT_STATE" = enabled ] && echo "clear-query+disable-search+hide-input" || echo abort)' \
+      --bind='1:pos(1)+accept' \
+      --bind='2:pos(2)+accept' \
+      --bind='3:pos(3)+accept' \
+      --bind='4:pos(4)+accept' \
+      --bind='5:pos(5)+accept' \
+      --bind='6:pos(6)+accept' \
+      --bind='7:pos(7)+accept' \
+      --bind='8:pos(8)+accept' \
+      --bind='9:pos(9)+accept' \
+      --bind='esc:transform([ "$FZF_INPUT_STATE" = enabled ] && echo "clear-query+disable-search+hide-input+rebind(j,k,1,2,3,4,5,6,7,8,9)" || echo abort)' \
       --bind='ctrl-c:abort' \
       >/dev/null 2>"$err"
   rc=$?

@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# bin/inbox-next — jump to the next waiting Claude pane.
+#
+# Bound (opt-in) by tmux-coding-agents.tmux to `prefix + <next-key>`.
+# Default keybind is unbound to avoid the conflict with tmux's built-in
+# next-window; user opts in via `set -g @inbox-next-key 'n'` in tmux.conf.
+#
+# Behavior:
+#   - if no waiting panes → display-message "no waiting agents"
+#   - if exactly one waiting pane and it's the current pane → display-message
+#     "only this pane is waiting"
+#   - else: cycle to the next waiting pane (after the cursor file). Wraps.
+
+set -uo pipefail
+
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+. "$PLUGIN_ROOT/lib/state.sh"
+
+# Get all waiting pane IDs, sorted oldest-first. We capture the rc to
+# distinguish "no waiting agents" (rc=0, empty list) from "lock contention"
+# (rc=3 from state::read in lib/state.sh).
+waiting_ids="$(state::list_by_status waiting 2>/dev/null | awk -F'\t' '{print $1}')"
+list_rc=${PIPESTATUS[0]:-0}
+if [ "$list_rc" = "3" ]; then
+  tmux display-message "tmux-coding-agents: state busy, retry in a moment"
+  exit 0
+fi
+if [ -z "$waiting_ids" ]; then
+  tmux display-message "tmux-coding-agents: no waiting agents"
+  exit 0
+fi
+
+current_pane="$(tmux display-message -p '#{pane_id}' 2>/dev/null)"
+
+# Count waiting.
+n=$(printf '%s\n' "$waiting_ids" | wc -l | tr -d ' ')
+
+if [ "$n" = "1" ] && [ "$(printf '%s\n' "$waiting_ids" | head -1)" = "$current_pane" ]; then
+  tmux display-message "tmux-coding-agents: only this pane is waiting"
+  exit 0
+fi
+
+# Cursor: track which pane we last jumped to so we cycle.
+cache_dir="$(state::cache_dir)" || exit 0
+cursor_file="$cache_dir/.next-cursor"
+last_jumped=""
+[ -r "$cursor_file" ] && last_jumped="$(cat "$cursor_file" 2>/dev/null)"
+
+# Pick: if last_jumped is in the list, jump to the entry AFTER it (wrap).
+# Otherwise jump to the first.
+target=""
+if [ -n "$last_jumped" ]; then
+  pick_next=0
+  while IFS= read -r pid; do
+    if [ "$pick_next" = "1" ]; then
+      target="$pid"
+      break
+    fi
+    if [ "$pid" = "$last_jumped" ]; then
+      pick_next=1
+    fi
+  done <<<"$waiting_ids"
+fi
+
+# Fallback: first.
+if [ -z "$target" ]; then
+  target="$(printf '%s\n' "$waiting_ids" | head -1)"
+fi
+
+# If after all that target == current, advance one more (best-effort cycle).
+if [ "$target" = "$current_pane" ] && [ "$n" -gt 1 ]; then
+  pick_next=0
+  while IFS= read -r pid; do
+    if [ "$pick_next" = "1" ]; then
+      target="$pid"
+      break
+    fi
+    if [ "$pid" = "$current_pane" ]; then
+      pick_next=1
+    fi
+  done <<<"$waiting_ids"
+  # Wrap.
+  if [ "$target" = "$current_pane" ]; then
+    target="$(printf '%s\n' "$waiting_ids" | head -1)"
+  fi
+fi
+
+# SECURITY (review wzrzsw2vu sweep F3): defense-in-depth — if state.tsv ever
+# contains a malformed pane_id that survived the upstream filters, refuse to
+# pass it to tmux. tmux's -t doesn't shell-eval today, but this protects
+# against future regressions where $target reaches a format string.
+[[ "$target" =~ ^%[0-9]+$ ]] || exit 0
+
+# Update cursor.
+printf '%s' "$target" >"$cursor_file" 2>/dev/null || true
+
+# Jump.
+tmux switch-client -t "$target" 2>/dev/null || tmux select-pane -t "$target" 2>/dev/null
+exit 0

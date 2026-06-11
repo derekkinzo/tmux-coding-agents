@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# bin/inbox-popup — interactive inbox picker, powered by fzf.
+#
+# Reads tracked-pane rows from a file path (argv[1]) and runs fzf with a
+# state-grouped list and a live capture-pane preview on the right. On Enter
+# the selected pane_id is printed to stdout. Esc / Ctrl-C cancels with empty
+# stdout. The caller (bin/inbox-pick) interprets empty stdout as "user
+# cancelled".
+#
+# State grouping comes from sort order (waiting → working → idle) plus a
+# colored glyph at the start of each row. fzf has no concept of
+# non-selectable rows, so the picker deliberately does not contain visible
+# section dividers — every visible line is a real selectable agent. The
+# legend in the sticky --header documents the glyph→state mapping.
+#
+# fzf binary discovery:
+#   The PATH inside `tmux display-popup -E` may resolve `fzf` to a different
+#   binary than the user's interactive shell would. Some shells do not
+#   export the user's interactive PATH at all. To make behavior
+#   deterministic, this script resolves fzf explicitly:
+#     1. $FZF_BIN env override (escape hatch)
+#     2. command -v fzf  (caller's PATH)
+#     3. ~/.local/bin/fzf
+#     4. /opt/homebrew/bin/fzf, /usr/local/bin/fzf  (macOS / hand-installed)
+#   The first executable with version >= 0.59 wins. The floor covers two
+#   needs: (a) older 0.4x releases (e.g. 0.44 shipped by Ubuntu 24.04)
+#   have rendering bugs inside tmux display-popup; (b) the modal-input
+#   pattern below uses --no-input plus the hide-input/show-input actions,
+#   all introduced in fzf 0.59 (Feb 2025).
+#
+# Inputs:
+#   $1                 — path to a file holding the TSV rows (no header),
+#                        7 columns: pane_id kind status since_epoch pid
+#                        project transcript_path
+#   stdout             — selected pane_id on Enter; empty on cancel
+#   stderr             — fzf stderr is forwarded so user-visible errors
+#                        surface instead of flickering silently
+#
+# Required tools: fzf >= 0.59, tmux, awk, sort.
+
+set -uo pipefail
+
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+. "$PLUGIN_ROOT/lib/render.sh"
+
+# ---- fzf binary discovery + version pin -----------------------------------
+#
+# Returns 0 if $1 is a runnable fzf >= 0.59, 1 otherwise. Version compare
+# treats anything with major >= 1 as ok and major == 0 with minor >= 59.
+#
+# 0.59 is the floor because the modal-input pattern (--no-input plus the
+# hide-input / show-input actions) was introduced in fzf 0.59 (Feb 2025).
+# That release also covers the older 0.4x rendering bugs we hit in
+# tmux display-popup, so a single floor satisfies both constraints.
+_fzf_version_ok() {
+  local bin="$1" ver maj min
+  [ -n "$bin" ] && [ -x "$bin" ] || return 1
+  ver="$("$bin" --version 2>/dev/null | awk '{print $1; exit}')"
+  case "$ver" in
+    [0-9]*.[0-9]*) ;;
+    *) return 1 ;;
+  esac
+  maj="${ver%%.*}"
+  min="${ver#*.}"
+  min="${min%%.*}"
+  case "$maj" in *[!0-9]*) return 1 ;; esac
+  case "$min" in *[!0-9]*) return 1 ;; esac
+  if [ "$maj" -gt 0 ]; then return 0; fi
+  if [ "$min" -ge 59 ]; then return 0; fi
+  return 1
+}
+
+# Validate caller's args first (cheap check), then the heavier fzf discovery.
+# Order matters for testability: a missing rows-file is a caller bug we want
+# to surface independently of whether fzf is on PATH.
+rows_file="${1:-}"
+if [ -z "$rows_file" ] || [ ! -r "$rows_file" ]; then
+  printf 'inbox-popup: rows-file path missing or unreadable: %s\n' \
+    "${rows_file:-<empty>}" >&2
+  exit 1
+fi
+
+# Preserve any inherited FZF_BIN as the first candidate (escape hatch).
+# We hold it in a separate var so the discovery loop can populate FZF_BIN
+# without clobbering the user-provided override before we get to read it.
+_fzf_override="${FZF_BIN:-}"
+FZF_BIN=""
+for cand in \
+  "$_fzf_override" \
+  "$(command -v fzf 2>/dev/null || true)" \
+  "$HOME/.local/bin/fzf" \
+  "/opt/homebrew/bin/fzf" \
+  "/usr/local/bin/fzf"; do
+  if _fzf_version_ok "$cand"; then
+    FZF_BIN="$cand"
+    break
+  fi
+done
+
+if [ -z "$FZF_BIN" ]; then
+  printf 'inbox-popup: no fzf >= 0.59 found.\n' >&2
+  printf '  Install a recent fzf (brew install fzf, or download a release from\n' >&2
+  printf '  https://github.com/junegunn/fzf/releases). Distro packages older\n' >&2
+  printf '  than 0.59 (e.g. Ubuntu 24.04 ships 0.44) lack the modal-input\n' >&2
+  printf '  primitives this picker uses.\n' >&2
+  printf '  Override discovery with: FZF_BIN=/path/to/fzf\n' >&2
+  exit 2
+fi
+
+now_epoch="$(date +%s)"
+
+# ---- build the fzf input --------------------------------------------------
+#
+# Each line is TAB-separated, two columns:
+#   col 1: visible display text — "(N) <icon>  <project>  <age>"
+#   col 2: bare pane_id  — selection output via --accept-nth=2
+#
+# fzf is invoked with --with-nth=1 (display only the first column) and
+# --accept-nth=2 (return only the second column on Enter). Both flags are
+# stable in fzf 0.59 (--accept-nth was added in 0.46, --with-nth precedes
+# the floor). The split lets us print the user-friendly display while
+# returning the parser-friendly pane_id without any cut/awk in the
+# post-process.
+#
+# The "(N)" prefix is a 1-based contiguous ordinal across ALL visible rows
+# (NEED -> WORK -> IDLE), modeled after tmux's own choose-tree shortcuts.
+# Pressing 1..9 quick-jumps and accepts the corresponding row.
+#
+# Section grouping is preserved via sort order: waiting first (newest first
+# within the section), then working, then idle. The colored glyph at the
+# start of each row still encodes state at a glance.
+build_fzf_input() {
+  local target="$1" color="$2" icon="$3"
+  local section_rows
+  section_rows="$(awk -F'\t' -v t="$target" '$3 == t {
+    inv = 9999999999 - $4
+    printf "%010d\t%s\n", inv, $0
+  }' "$rows_file" | sort -t$'\t' -k1,1n | cut -f2-)"
+  if [ -z "$section_rows" ]; then
+    return 0
+  fi
+  while IFS=$'\t' read -r pane_id _kind _status since _pid project _tpath; do
+    [ -n "$pane_id" ] || continue
+    local age proj_disp ord_label
+    case "$since" in '' | *[!0-9]*) since=0 ;; esac
+    age="$(render::ago "$((now_epoch - since))")"
+    proj_disp="$(printf '%s' "$project" | render::scrub_ansi)"
+    if [ "${#proj_disp}" -gt 40 ]; then
+      proj_disp="$(render::utf8_truncate_bytes "$proj_disp" 39)…"
+    fi
+    ordinal=$((ordinal + 1))
+    # Show "(N)" for ordinals 1..9 (the digit binds jump to those); for
+    # rows 10+ show "(  )" placeholder to keep column alignment but no
+    # one-keystroke shortcut. Multi-digit chord support would add modal
+    # complexity not worth it for an inbox usually under 10 entries.
+    if [ "$ordinal" -le 9 ]; then
+      ord_label="$(printf '(%d)' "$ordinal")"
+    else
+      ord_label='(  )'
+    fi
+    # display TAB pane_id
+    printf '%s \033[%sm%s\033[0m  %-40s  %s\t%s\n' \
+      "$ord_label" "$color" "$icon" "$proj_disp" "$age" "$pane_id"
+  done <<<"$section_rows"
+}
+
+input="$(
+  ordinal=0
+  build_fzf_input waiting '31' '!'
+  build_fzf_input working '33' '▶'
+  build_fzf_input idle '90' '·'
+)"
+
+if [ -z "$input" ]; then
+  printf 'no Claude sessions tracked yet\n' >&2
+  exit 0
+fi
+
+# ---- run fzf --------------------------------------------------------------
+#
+# Run fzf and capture its stdout. We deliberately do NOT use `|| true`:
+# masking fzf's exit code hides parse errors and produces silent-flicker
+# failure modes. We accept three exit codes:
+#   0   — selection made
+#   1   — no match (e.g. user filtered to nothing then hit enter)
+#   130 — user cancelled with Esc / Ctrl-C
+# Any other code is a real fzf failure — surface it.
+fzf_err="$(mktemp)"
+trap 'rm -f "$fzf_err"' EXIT
+
+# Header legend: colored glyphs documenting state mapping, then keybind hints.
+HEADER=$'\033[1;31m! NEED\033[0m  \033[1;33m▶ WORK\033[0m  \033[0;90m· IDLE\033[0m   1-9: jump · j/k: nav · /: search · enter: select · esc: close'
+
+# Smart Esc binding. FZF_INPUT_STATE is exported into fzf's own transform-action
+# subshell at runtime, NOT into this bash script. shellcheck SC2016 about
+# single-quote non-expansion is therefore expected and correct here.
+# shellcheck disable=SC2016
+ESC_BIND='esc:transform([ "$FZF_INPUT_STATE" = enabled ] && echo "clear-query+disable-search+hide-input+rebind(j,k,1,2,3,4,5,6,7,8,9)" || echo abort)'
+
+# When search opens (`/`), unbind the navigation + numeric quick-jump keys so
+# the user can type them as filter input. Esc rebinds them on close.
+SEARCH_BIND='/:show-input+enable-search+unbind(j,k,1,2,3,4,5,6,7,8,9)'
+
+set +e
+sel="$(printf '%s\n' "$input" \
+  | "$FZF_BIN" \
+    --ansi \
+    --no-sort \
+    --layout=reverse \
+    --prompt='agents> ' \
+    --pointer='›' \
+    --header="$HEADER" \
+    --header-first \
+    --delimiter=$'\t' \
+    --with-nth=1 \
+    --accept-nth=2 \
+    --preview="bash $(printf '%q' "$PLUGIN_ROOT/bin/inbox-preview") {2}" \
+    --preview-window='right:55%:wrap' \
+    --cycle \
+    --no-input \
+    --bind="$SEARCH_BIND" \
+    --bind='j:down' \
+    --bind='k:up' \
+    --bind='1:pos(1)+accept' \
+    --bind='2:pos(2)+accept' \
+    --bind='3:pos(3)+accept' \
+    --bind='4:pos(4)+accept' \
+    --bind='5:pos(5)+accept' \
+    --bind='6:pos(6)+accept' \
+    --bind='7:pos(7)+accept' \
+    --bind='8:pos(8)+accept' \
+    --bind='9:pos(9)+accept' \
+    --bind="$ESC_BIND" \
+    --bind='ctrl-c:abort' \
+    2>"$fzf_err")"
+fzf_rc=$?
+set -e
+
+case "$fzf_rc" in
+  0 | 1 | 130) : ;;
+  *)
+    printf 'inbox-popup: fzf exited rc=%d\n' "$fzf_rc" >&2
+    cat "$fzf_err" >&2
+    exit "$fzf_rc"
+    ;;
+esac
+
+# Always forward fzf stderr to ours: even on rc=0 fzf may have printed
+# warnings (e.g. terminal capability mismatches) that the user benefits
+# from seeing in @inbox-debug logs.
+if [ -s "$fzf_err" ]; then
+  cat "$fzf_err" >&2
+fi
+
+# ---- post-process the selection -------------------------------------------
+#
+# With --accept-nth=2 fzf already returns only the bare pane_id (the second
+# tab-separated column of the input). Validate against the canonical
+# pane_id format and emit it on stdout for the caller to switch-client.
+[ -n "$sel" ] || exit 0
+case "$sel" in
+  %[0-9]*) printf '%s\n' "$sel" ;;
+esac

@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# bin/inbox-status — emit the tmux status-bar segment.
+#
+# Wired by the user via:
+#   set -ag status-right ' #(~/.tmux/plugins/tmux-coding-agents/bin/inbox-status)'
+#
+# tmux re-evaluates this script on every status-interval. The script reads the
+# TSV under LOCK_SH, counts states, formats a compact segment with embedded
+# tmux #[fg=...] markup. Renders empty when nothing is actionable.
+#
+# Behavior:
+#   - opportunistic GC of dead PIDs while we're here (cheap; runs outside lock
+#     by computing alive set first, then handing to state::gc)
+#   - never blocks Claude or tmux: lock timeout → emit empty string
+#   - all rendered output passes through render::scrub_ansi for terminal-safety
+
+set -uo pipefail
+
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+. "$PLUGIN_ROOT/lib/state.sh"
+# shellcheck disable=SC1091
+. "$PLUGIN_ROOT/lib/render.sh"
+
+# Opportunistic GC: gather alive claude PIDs, hand to state::gc.
+#
+# Cooldown: 4 seconds — slightly under the recommended 5s status-interval so
+# we don't end up running every-other-tick in steady state. state::gc is a
+# no-op when no alive PIDs are passed in, so an unset/empty pgrep result
+# leaves rows untouched (see lib/state.sh state::gc safety).
+gc_if_due() {
+  local cache_dir tag now last
+  cache_dir="$(state::cache_dir)" 2>/dev/null || return 0
+  tag="$cache_dir/.gc-last"
+  now="$(date +%s)"
+  last=0
+  [ -r "$tag" ] && last="$(cat "$tag" 2>/dev/null || echo 0)"
+  case "$last" in *[!0-9]* | '') last=0 ;; esac
+  if [ $((now - last)) -lt 4 ]; then
+    return 0
+  fi
+  printf '%s' "$now" >"$tag" 2>/dev/null || true
+  local alive
+  alive="$(pgrep -u "$(id -u)" -x claude 2>/dev/null || true)"
+  printf '%s\n' "$alive" | state::gc 2>/dev/null || true
+}
+
+gc_if_due
+state::sweep_orphan_tmps
+
+# Single pass through state::read — halves lock overhead vs three state::count
+# calls. Lock-timeout / corrupt TSV → counts default to 0 (segment empty).
+counts="$(state::read 2>/dev/null \
+  | awk -F'\t' '
+      $3 == "waiting" { w++ }
+      $3 == "working" { k++ }
+      $3 == "idle"    { i++ }
+      END { printf "%d\t%d\t%d", w+0, k+0, i+0 }
+    ' 2>/dev/null || printf '0\t0\t0')"
+IFS=$'\t' read -r waiting working idle <<<"$counts"
+case "$waiting" in *[!0-9]* | '') waiting=0 ;; esac
+case "$working" in *[!0-9]* | '') working=0 ;; esac
+case "$idle" in *[!0-9]* | '') idle=0 ;; esac
+
+# Optional user-defined format. When @inbox-status-format is set, render::status
+# substitutes {NEED}/{WORK}/{IDLE}/{TOTAL} placeholders and emits the template
+# even when all counts are 0 (persistent badge mode).
+fmt=""
+if command -v tmux >/dev/null 2>&1; then
+  fmt="$(tmux show-option -gqv '@inbox-status-format' 2>/dev/null || true)"
+fi
+
+# Pass output through render::scrub_ansi per DESIGN §9 step 5: defense against
+# any control bytes that might have slipped through.
+render::status "$waiting" "$working" "$idle" "$fmt" | render::scrub_ansi
+exit 0

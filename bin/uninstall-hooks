@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# bin/uninstall-hooks — remove tmux-coding-agents from ~/.claude/settings.json.
+#
+# Default mode: filters out our hook entries in-place (preserves user's other
+# settings + hooks). Backs up first.
+#
+# --restore mode: replaces settings.json with the most recent .bak.* (which
+# was the file's content immediately before install ran). Use this if you
+# want to revert any side effects of installation.
+#
+# Concurrency: flocks the same sidecar lock as bin/install-hooks so the two
+# cannot interleave.
+#
+# Symlink-preserving: if settings.json is a symlink (dotfiles workflow), we
+# write through cat to keep the inode rather than mv-replace.
+
+set -euo pipefail
+
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HOOK_BIN="$PLUGIN_ROOT/bin/hook"
+SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+
+mode="filter"
+case "${1:-}" in
+  --restore) mode="restore" ;;
+  --filter | '') mode="filter" ;;
+  -h | --help)
+    cat <<'EOF'
+Usage: uninstall-hooks [--filter | --restore]
+  --filter   (default) remove our hook entries, keep all other settings
+  --restore  replace settings.json with the most recent .bak.*
+EOF
+    exit 0
+    ;;
+  *)
+    printf 'uninstall-hooks: unknown arg "%s" (try --help)\n' "$1" >&2
+    exit 1
+    ;;
+esac
+
+# Trap state.
+tmp=""
+lock_held=0
+
+err() {
+  printf 'uninstall-hooks: %s\n' "$*" >&2
+}
+
+cleanup() {
+  if [ "$lock_held" -eq 1 ]; then
+    flock -u 200 2>/dev/null || true
+  fi
+  if [ -n "${tmp:-}" ]; then
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
+if ! command -v jq >/dev/null 2>&1; then
+  err "jq is required"
+  exit 1
+fi
+
+if [ ! -e "$SETTINGS" ]; then
+  err "$SETTINGS not found; nothing to do"
+  exit 0
+fi
+
+# Resolve symlink to inode-preserving operations.
+preserve_symlink=0
+settings_target="$SETTINGS"
+if [ -L "$SETTINGS" ]; then
+  preserve_symlink=1
+  resolved="$(readlink -f "$SETTINGS" 2>/dev/null || readlink "$SETTINGS")"
+  if [ -n "$resolved" ] && [ -f "$resolved" ]; then
+    settings_target="$resolved"
+  fi
+fi
+
+if [ ! -f "$settings_target" ]; then
+  err "$settings_target not found; nothing to do"
+  exit 0
+fi
+
+if ! jq -e . "$settings_target" >/dev/null 2>&1; then
+  err "$settings_target is not valid JSON; refusing to modify"
+  exit 1
+fi
+
+# Restore mode: find the most recent .bak.* and replace.
+if [ "$mode" = "restore" ]; then
+  # shellcheck disable=SC2012
+  bak="$(ls -t "$settings_target".bak.* 2>/dev/null | head -1)"
+  if [ -z "$bak" ] || [ ! -f "$bak" ]; then
+    err "no .bak.* file found to restore from"
+    exit 1
+  fi
+  if ! jq -e . "$bak" >/dev/null 2>&1; then
+    err "backup $bak is not valid JSON; refusing to restore"
+    exit 1
+  fi
+  # Lock + write.
+  lock="$settings_target.lock"
+  exec 200>>"$lock" 2>/dev/null || {
+    err "could not open lock $lock"
+    exit 1
+  }
+  if ! flock -w 5 -x 200; then
+    err "could not acquire lock on $lock within 5s"
+    exit 1
+  fi
+  lock_held=1
+  if [ "$preserve_symlink" = "1" ]; then
+    cat "$bak" >"$settings_target"
+  else
+    cp "$bak" "$settings_target"
+  fi
+  printf 'tmux-coding-agents: restored %s from %s\n' "$SETTINGS" "$bak"
+  exit 0
+fi
+
+# Filter mode (default).
+
+# Early-exit: if there's nothing of ours, no churn. Match either the default
+# path substring or the absolute hook path (covers alt-install dirs).
+if ! jq -e --arg hook "$HOOK_BIN" '
+  (.hooks // {})
+  | to_entries
+  | any(
+      .value | (
+        if type == "array" then .[] | (.hooks // [])[]?
+        elif type == "object" then to_entries[] | .value[]?
+        else empty
+        end
+      ) | (.command // "") | (contains("tmux-coding-agents/bin/hook") or contains($hook))
+    )
+' "$settings_target" >/dev/null 2>&1; then
+  printf 'tmux-coding-agents: nothing to remove from %s\n' "$SETTINGS"
+  exit 0
+fi
+
+# Lock.
+lock="$settings_target.lock"
+exec 200>>"$lock" 2>/dev/null || {
+  err "could not open lock $lock"
+  exit 1
+}
+if ! flock -w 5 -x 200; then
+  err "could not acquire lock on $lock within 5s"
+  exit 1
+fi
+lock_held=1
+
+# Backup.
+backup="$settings_target.bak.$(date +%s).$$"
+cp "$settings_target" "$backup"
+
+# tmpfile in same dir for atomic mv.
+tmp="$(mktemp "$(dirname "$settings_target")/.settings.json.XXXXXX")"
+chmod --reference="$settings_target" "$tmp" 2>/dev/null || chmod 0600 "$tmp"
+
+jq --arg hook "$HOOK_BIN" '
+  def is_ours(cmd):
+    cmd as $c
+    | (($c // "") | contains("tmux-coding-agents/bin/hook"))
+      or (($c // "") | contains($hook));
+
+  def normalize_event_value(v):
+    if v == null then []
+    elif (v | type) == "array" then
+      v | map(
+        if (. | type) == "object" and (.hooks | type) == "array"
+          then . + {matcher: (.matcher // "")}  # preserve sibling fields
+        else empty
+        end
+      )
+    elif (v | type) == "object" then
+      v | to_entries | map({
+        matcher: .key,
+        hooks: (if (.value | type) == "array" then .value else [] end)
+      })
+    else []
+    end;
+
+  def filter_ours(arr):
+    arr | map(
+      .hooks = (.hooks | map(select((is_ours(.command)) | not)))
+    ) | map(select((.hooks | length) > 0));
+
+  if (.hooks | type) != "object" then .
+  else
+    .hooks = (
+      .hooks
+      | with_entries(.value = filter_ours(normalize_event_value(.value)))
+      | with_entries(select((.value | length) > 0))
+    )
+  end
+' "$settings_target" >"$tmp"
+
+if ! jq -e . "$tmp" >/dev/null 2>&1; then
+  err "filter produced invalid JSON; aborting (backup at $backup)"
+  exit 1
+fi
+
+# Final write — preserve inode if symlinked.
+if [ "$preserve_symlink" = "1" ]; then
+  cat "$tmp" >"$settings_target"
+  rm -f "$tmp"
+  tmp=""
+else
+  mv -f "$tmp" "$settings_target"
+  tmp=""
+fi
+
+cat <<EOF
+tmux-coding-agents: hooks removed from $SETTINGS
+                    backup at $backup
+EOF

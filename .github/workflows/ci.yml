@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update -y && sudo apt-get install -y shellcheck
+      - name: Lint shell scripts
+        run: shellcheck lib/*.sh bin/* tmux-coding-agents.tmux
+
+  shfmt:
+    name: shfmt (format check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shfmt
+        run: |
+          curl -fsSL -o /tmp/shfmt \
+            https://github.com/mvdan/sh/releases/download/v3.8.0/shfmt_v3.8.0_linux_amd64
+          chmod +x /tmp/shfmt
+          sudo mv /tmp/shfmt /usr/local/bin/shfmt
+      - name: Verify formatting
+        # 2-space indent, indent switch cases, follow .editorconfig.
+        run: shfmt -d -i 2 -ci -bn lib/*.sh bin/* tmux-coding-agents.tmux
+
+  bats:
+    name: bats (${{ matrix.os }} / bash ${{ matrix.bash }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Test bash 3.2 (legacy macOS default) via macos runners + brew,
+        # 5.1 (Ubuntu 22.04 default), 5.2 (Ubuntu 24.04 default).
+        include:
+          - os: ubuntu-latest
+            bash: '5.2'      # Ubuntu 24.04 default
+          - os: ubuntu-22.04
+            bash: '5.1'      # Ubuntu 22.04 default
+          - os: macos-latest
+            bash: '3.2'      # /bin/bash on macOS — the floor we support
+          - os: macos-latest
+            bash: '5.2'      # homebrew bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install runtime deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq util-linux tmux
+          # apt fzf is too old (Ubuntu 24.04 ships 0.44; we need >= 0.50
+          # for in-popup rendering to work). Pull a recent release.
+          FZF_VER=0.65.0
+          curl -fsSL -o /tmp/fzf.tgz \
+            "https://github.com/junegunn/fzf/releases/download/v${FZF_VER}/fzf-${FZF_VER}-linux_amd64.tar.gz"
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf /tmp/fzf.tgz -C "$HOME/.local/bin"
+          chmod +x "$HOME/.local/bin/fzf"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/fzf" --version
+
+      - name: Install runtime deps (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install jq fzf flock tmux || true
+          # bash 3.2 lives at /bin/bash; bash 5.x via brew install bash.
+          if [ "${{ matrix.bash }}" != "3.2" ]; then
+            brew install bash
+          fi
+
+      - name: Install bats-core
+        run: |
+          # npm prefix to user dir (no sudo needed). Use bats-core 1.10+ which
+          # implements BATS_TEST_TMPDIR (Ubuntu 22.04's apt bats is 1.2.1, too old).
+          mkdir -p "$HOME/.npm-global"
+          npm config set prefix "$HOME/.npm-global"
+          npm install -g bats
+          echo "$HOME/.npm-global/bin" >> "$GITHUB_PATH"
+          "$HOME/.npm-global/bin/bats" --version
+
+      - name: Show bash version under test
+        run: |
+          if [ "${{ matrix.bash }}" = "3.2" ] && [ "${{ runner.os }}" = "macOS" ]; then
+            /bin/bash --version
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            "$(brew --prefix bash)/bin/bash" --version
+          else
+            bash --version
+          fi
+
+      - name: Run bats suite
+        env:
+          # Force bats to invoke our scripts under the matrix-pinned bash.
+          # Each script declares `#!/usr/bin/env bash`, so PATH order matters.
+          PIN_BASH: ${{ matrix.bash }}
+        run: |
+          if [ "$PIN_BASH" = "3.2" ] && [ "${{ runner.os }}" = "macOS" ]; then
+            export BASH=/bin/bash
+            export PATH="/bin:$PATH"
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            export BASH="$(brew --prefix bash)/bin/bash"
+            export PATH="$(brew --prefix bash)/bin:$PATH"
+          fi
+          # Sanity: bats itself runs under whatever node finds, but our scripts
+          # use #!/usr/bin/env bash so PATH controls which bash they use.
+          which bash
+          bash --version | head -1
+          bats --tap tests/

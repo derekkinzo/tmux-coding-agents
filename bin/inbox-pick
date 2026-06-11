@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# bin/inbox-pick — open the picker (display-popup → choose-tree).
+#
+# Bound by tmux-coding-agents.tmux to `prefix + <pick-key>`.
+#
+# Behavior:
+#   - if hooks not installed → display-message pointing to install-hooks; exit
+#   - if no tracked panes   → display-message "no Claude sessions tracked yet"
+#   - else: build the filter expression for choose-tree and exec it
+#
+# Sort order: waiting first (by recency), working next, idle last.
+# Native preview is on by default (choose-tree's `v` toggles).
+
+set -uo pipefail
+
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+. "$PLUGIN_ROOT/lib/state.sh"
+# shellcheck disable=SC1091
+. "$PLUGIN_ROOT/lib/render.sh"
+
+SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
+
+# Quick check: are our hooks wired? Use a sentinel file to avoid re-parsing
+# settings.json on every keypress (cached after first successful install).
+hooks_installed() {
+  local cache_dir tag mtime_settings mtime_tag
+  cache_dir="$(state::cache_dir)" 2>/dev/null || return 1
+  tag="$cache_dir/.hooks-installed"
+  if [ -r "$tag" ] && [ -r "$SETTINGS" ]; then
+    mtime_settings="$(date -r "$SETTINGS" +%s 2>/dev/null || stat -c %Y "$SETTINGS" 2>/dev/null || echo 0)"
+    mtime_tag="$(cat "$tag" 2>/dev/null || echo 0)"
+    case "$mtime_tag" in *[!0-9]* | '') mtime_tag=0 ;; esac
+    if [ "$mtime_tag" -ge "$mtime_settings" ]; then
+      return 0
+    fi
+  fi
+  if [ -r "$SETTINGS" ] \
+    && command -v jq >/dev/null 2>&1 \
+    && jq -e '
+       (.hooks // {}) | to_entries | any(.value | type == "array" and any(
+         .hooks // [] | any(.command // "" | contains("tmux-coding-agents/bin/hook"))))
+     ' "$SETTINGS" >/dev/null 2>&1; then
+    # Cache the verification.
+    if [ -n "$cache_dir" ]; then
+      mtime_settings="$(date -r "$SETTINGS" +%s 2>/dev/null || stat -c %Y "$SETTINGS" 2>/dev/null || echo 0)"
+      printf '%s' "$mtime_settings" >"$tag" 2>/dev/null || true
+    fi
+    return 0
+  fi
+  return 1
+}
+
+if ! hooks_installed; then
+  tmux display-message "tmux-coding-agents: hooks not installed — run: $PLUGIN_ROOT/bin/install-hooks"
+  exit 0
+fi
+
+# Get current tracked panes (sorted: waiting > working > idle).
+#
+# SECURITY (review wwbo2gfgl CRITICAL): every row is filtered through a strict
+# `^%[0-9]+$` regex on the pane_id column. A row with a malformed pane_id is
+# dropped (and logged via debug if enabled) rather than processed, because the
+# pane_id is interpolated into tmux format strings further down. State.sh
+# already validates writes, so this is defense in depth against any future
+# regression that lets a bad value through.
+rows="$(state::read 2>/dev/null \
+  | awk -F'\t' '$1 ~ /^%[0-9]+$/' || true)"
+if [ -z "$rows" ]; then
+  tmux display-message "tmux-coding-agents: no Claude sessions tracked yet"
+  exit 0
+fi
+
+# Lazy GC of stale rows: drop entries whose pane no longer exists in any tmux
+# session. DESIGN §4 / §6.4 / §10 require this be a REAL state.tsv rewrite,
+# not just an in-memory filter — so a tmux restart eventually empties the TSV
+# instead of accumulating dead rows forever.
+#
+# We pipe `tmux list-panes` straight into state::gc_panes, which atomically
+# rewrites state.tsv under LOCK_EX dropping any row whose pane_id is not in
+# the live set. Then re-read.
+live_pane_ids="$(tmux list-panes -as -F '#{pane_id}' 2>/dev/null \
+  | awk '/^%[0-9]+$/')"
+if [ -n "$live_pane_ids" ]; then
+  printf '%s\n' "$live_pane_ids" | state::gc_panes 2>/dev/null || true
+  rows="$(state::read 2>/dev/null \
+    | awk -F'\t' '$1 ~ /^%[0-9]+$/' || true)"
+fi
+if [ -z "$rows" ]; then
+  tmux display-message "tmux-coding-agents: no Claude sessions tracked yet"
+  exit 0
+fi
+
+# Build a sorted list of pane_ids, with sort-key prefixed (status rank, then
+# since_epoch desc). Pipe through awk → sort → cut.
+sorted_pane_ids="$(
+  printf '%s\n' "$rows" \
+    | awk -F'\t' '{
+        # rank: 0 waiting, 1 working, 2 idle/other
+        s = $3
+        if (s == "waiting") r = 0
+        else if (s == "working") r = 1
+        else r = 2
+        # secondary: newer first (use 9999999999 - epoch for ascending sort)
+        inv = 9999999999 - $4
+        printf "%d\t%010d\t%s\n", r, inv, $1
+      }' \
+    | sort -t$'\t' -k1,1n -k2,2n \
+    | cut -f3
+)"
+
+if [ -z "$sorted_pane_ids" ]; then
+  tmux display-message "tmux-coding-agents: no Claude sessions tracked yet"
+  exit 0
+fi
+
+# Hand off to the categorized TUI. The popup runs bin/inbox-popup, which:
+#   - reads rows from a file path (passed as argv) — NOT stdin, because the
+#     popup's stdin must be the user's keyboard so the TUI can read keys
+#   - draws a NEED/WORK/IDLE grouped picker with right-side preview
+#   - prints the chosen pane_id to its stdout (empty on cancel)
+#
+# We capture stdout via a redirect file because tmux display-popup does not
+# pipe the child's stdout back to the caller.
+# mktemp without -t (portable across BSD/macOS and GNU). BSD mktemp's -t
+# treats the suffix as a prefix; GNU's -t selects $TMPDIR. The explicit
+# template form works identically on both.
+rows_file="$(mktemp "${TMPDIR:-/tmp}/tca-rows.XXXXXX")"
+out_file="$(mktemp "${TMPDIR:-/tmp}/tca-pick.XXXXXX")"
+trap 'rm -f "$rows_file" "$out_file"' EXIT
+printf '%s\n' "$rows" >"$rows_file"
+
+# Build the inner command. Both file paths are mktemp'd so they're shell-safe;
+# we still printf %q to be explicit. The popup binary is also %q-quoted to
+# survive any spaces in the plugin-install path.
+popup_cmd="$(printf '%q' "$PLUGIN_ROOT/bin/inbox-popup") $(printf '%q' "$rows_file") > $(printf '%q' "$out_file")"
+tmux display-popup -E -h 80% -w 90% "$popup_cmd"
+
+selected="$(tr -d '\r\n' <"$out_file" 2>/dev/null || true)"
+case "$selected" in
+  '') exit 0 ;;
+  *)
+    if [[ "$selected" =~ ^%[0-9]+$ ]]; then
+      tmux switch-client -t "$selected" 2>/dev/null \
+        || tmux select-pane -t "$selected" 2>/dev/null \
+        || true
+    fi
+    ;;
+esac

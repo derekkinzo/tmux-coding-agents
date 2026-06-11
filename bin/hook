@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+# bin/hook — Claude Code hook handler.
+#
+# Wired into ~/.claude/settings.json by bin/install-hooks. Called by Claude
+# for each lifecycle event (PreToolUse, Stop, Notification, ...).
+#
+# Usage:
+#   bin/hook <EventName>    # event name as $1
+#   stdin = JSON payload from Claude
+#   environment = inherits from the tmux pane (TMUX_PANE is the key var)
+#
+# Behavior:
+#   - reads at most 64 KiB from stdin (DOS guard)
+#   - parses minimal fields via lib/jsonpb.sh
+#   - applies state transition via lib/transitions.sh
+#   - upserts/removes TSV row via lib/state.sh
+#   - touches tmux to refresh status bar so the user sees it immediately
+#   - ALWAYS exits 0 — never fails Claude
+#
+# Debug logging (when @inbox-debug=on):
+#   $XDG_CACHE_HOME/tmux-coding-agents/log
+#   one line per event: ISO-8601 ts \t pane_id \t event \t old_state \t new_state
+
+# NOTE on shell options:
+#   - set -u: catch unbound vars (we want bug visibility in dev, soft-fail in prod)
+#   - NO -e: we explicitly handle each fallible call so a single recoverable
+#     error (e.g. flock timeout) never silently terminates the hook
+#   - NO pipefail: command-substitution pipelines like `state::read | awk ...`
+#     intentionally tolerate the rc=3 lock-timeout from state::read, so we treat
+#     "no data" as the result rather than aborting
+set -u
+
+# Final safety net: any uncaught failure still exits 0 so Claude never sees us
+# fail. We also catch EXIT to log if debug is on. This trap is the LAST line
+# of defense — every meaningful failure path above logs explicitly first.
+_hook_on_exit() {
+  local rc=$?
+  if [ "$rc" -ne 0 ] && declare -F hook_log >/dev/null 2>&1; then
+    hook_log "EXIT rc=$rc — uncaught error path"
+  fi
+  exit 0
+}
+trap _hook_on_exit EXIT
+
+# ---- self-locate, source libs ----------------------------------------------
+PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+. "$PLUGIN_ROOT/lib/jsonpb.sh"
+# shellcheck disable=SC1091
+. "$PLUGIN_ROOT/lib/state.sh"
+# shellcheck disable=SC1091
+. "$PLUGIN_ROOT/lib/detect.sh"
+# shellcheck disable=SC1091
+. "$PLUGIN_ROOT/lib/transitions.sh"
+
+# ---- debug helper ----------------------------------------------------------
+hook_debug_enabled() {
+  [ "${INBOX_DEBUG:-}" = "on" ] && return 0
+  if command -v tmux >/dev/null 2>&1; then
+    case "$(tmux show-option -gqv '@inbox-debug' 2>/dev/null)" in
+      on | 1 | true) return 0 ;;
+    esac
+  fi
+  return 1
+}
+
+hook_log() {
+  hook_debug_enabled || return 0
+  local cache_dir
+  cache_dir="$(state::cache_dir)" || return 0
+  local logfile="$cache_dir/log"
+  # SECURITY: refuse to follow a symlink at the log path. Combined with the
+  # 0700 cache_dir, this stops an attacker who can plant a symlink (e.g., to
+  # ~/.bashrc) from having log lines appended to arbitrary files.
+  if [ -L "$logfile" ]; then
+    return 0
+  fi
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"
+  printf '%s\t%s\n' "$ts" "$*" >>"$logfile" 2>/dev/null || true
+}
+
+# ---- main flow -------------------------------------------------------------
+event="${1:-}"
+[ -n "$event" ] || exit 0
+
+# Require jq for safe JSON parsing.
+jsonpb::require_jq 2>/dev/null || {
+  hook_log "FATAL jq missing; event=$event dropped"
+  exit 0
+}
+
+# Read at most 64 KiB from stdin.
+#
+# We compare BYTES (LC_ALL=C with awk) — under a UTF-8 locale, bash's ${#var}
+# counts codepoints, which would let multi-byte payloads slip past the limit.
+payload="$(head -c 65537)"
+payload_bytes="$(LC_ALL=C printf '%s' "$payload" | wc -c | tr -d ' ')"
+if [ "${payload_bytes:-0}" -gt 65536 ]; then
+  hook_log "DROP payload>64KiB event=$event bytes=$payload_bytes"
+  exit 0
+fi
+[ -z "$payload" ] && payload='{}'
+
+# Quick JSON validity check; bail silently on garbage.
+if ! printf '%s' "$payload" | jq -e . >/dev/null 2>&1; then
+  hook_log "DROP invalid JSON event=$event"
+  exit 0
+fi
+
+# JSON depth cap (DESIGN §15 rule #2): refuse payloads nested beyond 8 levels.
+# Computed via jq walking the tree; cheap on payloads that already passed
+# parse validation. Reject silently to avoid feeding pathological payloads
+# any further into our pipeline.
+json_depth="$(printf '%s' "$payload" \
+  | jq '[paths] | map(length) | (max // 0)' 2>/dev/null || echo 0)"
+case "$json_depth" in *[!0-9]* | '') json_depth=0 ;; esac
+if [ "$json_depth" -gt 8 ]; then
+  hook_log "DROP json_depth=$json_depth event=$event"
+  exit 0
+fi
+
+# Pane attribution. Without TMUX_PANE we cannot store anything.
+#
+# SECURITY: validate TMUX_PANE against the canonical tmux pane_id format
+# `^%[0-9]+$` before using it. Tmux always emits this exact form; an unusual
+# value indicates a hostile environment we should not trust.
+pane_id="${TMUX_PANE:-}"
+[ -n "$pane_id" ] || {
+  hook_log "SKIP no TMUX_PANE event=$event"
+  exit 0
+}
+if [[ ! "$pane_id" =~ ^%[0-9]+$ ]]; then
+  hook_log "DROP malformed TMUX_PANE='$pane_id' event=$event"
+  exit 0
+fi
+
+# Pull what we need from the payload.
+session_pid="$(jsonpb::peek "$payload" 'pid')"
+case "$session_pid" in
+  '' | *[!0-9]*) session_pid='' ;;
+esac
+cwd="$(jsonpb::peek "$payload" 'cwd')"
+tpath="$(jsonpb::peek "$payload" 'transcript_path')"
+
+# Look up current state for transition. Empty if untracked.
+#
+# state::read returns rc=3 on lock-timeout; we DO NOT use pipefail here so the
+# command-substitution always assigns "" rather than killing the hook. An empty
+# $current_row simply means "we don't know the prior state" — the transition
+# function handles that as "untracked".
+current_state=""
+current_row="$(state::read 2>/dev/null | awk -F'\t' -v p="$pane_id" '$1 == p { print; exit }')"
+if [ -n "$current_row" ]; then
+  current_state="$(printf '%s' "$current_row" | awk -F'\t' '{print $3}')"
+fi
+
+# Compute new state. Pure function.
+new_state="$(transitions::next 'claude' "$current_state" "$event" "$payload")"
+
+# For Notification events, extract the notification kind for the debug log.
+# This is the diagnostic hook that lets us tell permission_prompt apart from
+# auth_success / elicitation_*  / etc. when reading the trace later.
+notif_kind=""
+if [ "$event" = "Notification" ]; then
+  notif_kind="$(jsonpb::peek_nested "$payload" 'notification.kind' 2>/dev/null || true)"
+  [ -z "$notif_kind" ] && notif_kind="$(jsonpb::peek "$payload" 'notification_type' 2>/dev/null || true)"
+  [ -z "$notif_kind" ] && notif_kind='-'
+fi
+
+now_epoch="$(date +%s)"
+
+# Apply.
+if [ "$event" = "SessionEnd" ]; then
+  if [ -n "${TMUX_CODING_AGENTS_DRY_RUN:-}" ]; then
+    hook_log "DRY-RM pane=$pane_id"
+  else
+    state::remove "$pane_id" || true
+    hook_log "RM pane=$pane_id"
+  fi
+elif [ -n "$new_state" ]; then
+  # Project name from cwd (or carry forward from existing row).
+  local_project=""
+  if [ -n "$cwd" ]; then
+    local_project="$(detect::pane_project "$cwd")"
+  fi
+  # TSV data rows: 1=pane_id, 2=kind, 3=status, 4=since, 5=pid, 6=project, 7=transcript_path
+  if [ -z "$local_project" ] && [ -n "$current_row" ]; then
+    local_project="$(printf '%s' "$current_row" | awk -F'\t' '{print $6}')"
+  fi
+  if [ -z "$tpath" ] && [ -n "$current_row" ]; then
+    tpath="$(printf '%s' "$current_row" | awk -F'\t' '{print $7}')"
+  fi
+  if [ -z "$session_pid" ] && [ -n "$current_row" ]; then
+    session_pid="$(printf '%s' "$current_row" | awk -F'\t' '{print $5}')"
+  fi
+  # Strip control bytes from project + tpath (defense in depth).
+  local_project="$(printf '%s' "$local_project" | LC_ALL=C tr -d '\000-\037\177')"
+  tpath="$(printf '%s' "$tpath" | LC_ALL=C tr -d '\000-\037\177')"
+
+  # Build a per-event tail for the debug log. For Notification events we
+  # carry the kind (permission_prompt, auth_success, ...) so the trace
+  # lets us distinguish blocking notifications from informational ones.
+  log_tail="event=$event"
+  [ -n "$notif_kind" ] && log_tail="$log_tail kind=$notif_kind"
+  if [ -n "${TMUX_CODING_AGENTS_DRY_RUN:-}" ]; then
+    # DESIGN §8: dry-run mode — log the would-be transition but don't mutate.
+    hook_log "DRY pane=$pane_id ${current_state:--} → $new_state $log_tail"
+  else
+    state::upsert \
+      "$pane_id" 'claude' "$new_state" "$now_epoch" \
+      "${session_pid:-0}" "$local_project" "$tpath" || true
+    hook_log "UP pane=$pane_id ${current_state:--} → $new_state $log_tail"
+  fi
+fi
+
+# Nudge tmux to repaint the status bar so the user sees state changes promptly,
+# without having to wait for status-interval to tick. When a pane transitions
+# INTO waiting (was anything else) we additionally surface a brief
+# display-message on every attached client so the user notices even when
+# their eyes are not on the status segment.
+if command -v tmux >/dev/null 2>&1 && [ -n "${TMUX:-}" ]; then
+  tmux refresh-client -S 2>/dev/null || true
+  if [ "${new_state:-}" = "waiting" ] && [ "${current_state:-}" != "waiting" ]; then
+    # SECURITY: tmux display-message parses its argument as a FORMAT string,
+    # so any `#` from a project name would be interpreted as a format
+    # introducer (`#(...)` would shell-execute). Double every `#` before
+    # composing the message — this is the same defense lib/render.sh
+    # applies anywhere LLM-controlled text reaches a tmux format context.
+    proj_safe="${local_project:-}"
+    proj_safe="${proj_safe//\#/##}"
+    [ -z "$proj_safe" ] && proj_safe="pane $pane_id"
+    tmux display-message "tmux-coding-agents: $proj_safe needs you" 2>/dev/null || true
+  fi
+fi
+
+exit 0

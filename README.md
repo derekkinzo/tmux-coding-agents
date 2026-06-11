@@ -70,7 +70,7 @@ States: **waiting** (red `!`) → needs your input now; **working** (orange `▶
 tmux 3.2+, bash 3.2+, Claude Code, plus two small CLI tools:
 
 - `jq` — safe JSON parsing of hook payloads (also required by `install-hooks`)
-- `fzf >= 0.50` — picker selection UI. Distro fzf packages older than 0.50
+- `fzf >= 0.59` — picker selection UI. Distro fzf packages older than 0.59
   (notably Ubuntu 24.04 / Debian's 0.44) have rendering issues inside tmux
   display-popup; the picker will hard-error rather than draw a blank popup.
 

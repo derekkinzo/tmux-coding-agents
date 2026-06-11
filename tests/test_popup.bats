@@ -52,11 +52,11 @@ make_rows() {
       --prompt='agents> ' \
       --pointer='›' \
       --cycle \
-      --disabled \
+      --no-input \
+      --bind='/:show-input+enable-search' \
       --bind='j:down' \
       --bind='k:up' \
-      --bind='/:enable-search' \
-      --bind='esc:transform([ -n {q} ] && echo disable-search+clear-query || echo abort)' \
+      --bind='esc:transform([ "$FZF_INPUT_STATE" = enabled ] && echo "clear-query+disable-search+hide-input" || echo abort)' \
       --bind='ctrl-c:abort' \
       >/dev/null 2>"$err"
   rc=$?

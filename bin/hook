@@ -158,6 +158,16 @@ fi
 # Compute new state. Pure function.
 new_state="$(transitions::next 'claude' "$current_state" "$event" "$payload")"
 
+# For Notification events, extract the notification kind for the debug log.
+# This is the diagnostic hook that lets us tell permission_prompt apart from
+# auth_success / elicitation_*  / etc. when reading the trace later.
+notif_kind=""
+if [ "$event" = "Notification" ]; then
+  notif_kind="$(jsonpb::peek_nested "$payload" 'notification.kind' 2>/dev/null || true)"
+  [ -z "$notif_kind" ] && notif_kind="$(jsonpb::peek "$payload" 'notification_type' 2>/dev/null || true)"
+  [ -z "$notif_kind" ] && notif_kind='-'
+fi
+
 now_epoch="$(date +%s)"
 
 # Apply.
@@ -188,14 +198,19 @@ elif [ -n "$new_state" ]; then
   local_project="$(printf '%s' "$local_project" | LC_ALL=C tr -d '\000-\037\177')"
   tpath="$(printf '%s' "$tpath" | LC_ALL=C tr -d '\000-\037\177')"
 
+  # Build a per-event tail for the debug log. For Notification events we
+  # carry the kind (permission_prompt, auth_success, ...) so the trace
+  # lets us distinguish blocking notifications from informational ones.
+  log_tail="event=$event"
+  [ -n "$notif_kind" ] && log_tail="$log_tail kind=$notif_kind"
   if [ -n "${TMUX_CODING_AGENTS_DRY_RUN:-}" ]; then
     # DESIGN §8: dry-run mode — log the would-be transition but don't mutate.
-    hook_log "DRY pane=$pane_id ${current_state:--} → $new_state event=$event"
+    hook_log "DRY pane=$pane_id ${current_state:--} → $new_state $log_tail"
   else
     state::upsert \
       "$pane_id" 'claude' "$new_state" "$now_epoch" \
       "${session_pid:-0}" "$local_project" "$tpath" || true
-    hook_log "UP pane=$pane_id ${current_state:--} → $new_state event=$event"
+    hook_log "UP pane=$pane_id ${current_state:--} → $new_state $log_tail"
   fi
 fi
 

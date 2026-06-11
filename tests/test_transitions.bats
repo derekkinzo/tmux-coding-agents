@@ -24,18 +24,21 @@ setup() {
   assert_output "working"
 }
 
-@test "PreToolUse from waiting STAYS waiting (sticky NEED)" {
-  # When the user is needed, tool-flow events do not silently clear the
-  # signal. Without this, the waiting state lasts only as long as the
-  # gap between the prompt and the tool's next call — typically too short
-  # for the user to notice in the status bar.
+@test "PreToolUse from waiting → working (Claude resumed after Allow)" {
+  # When a permission_prompt has been resolved, the next thing Claude does
+  # is invoke the tool — that's the unambiguous "I'm acting again" signal.
+  # Holding 'waiting' past that point makes the status indicator stale
+  # (live trace caught a pane stuck on NEED for 88+ seconds while tools
+  # streamed unchallenged).
   run transitions::next claude waiting PreToolUse '{}'
-  assert_output "waiting"
+  assert_output "working"
 }
 
-@test "PostToolUse from waiting STAYS waiting (sticky NEED)" {
+@test "PostToolUse from waiting → working (tool finished after Allow)" {
+  # Same rationale as PreToolUse: a tool result coming back means the
+  # human-needs-you signal has been resolved.
   run transitions::next claude waiting PostToolUse '{}'
-  assert_output "waiting"
+  assert_output "working"
 }
 
 @test "UserPromptSubmit from waiting → working (human re-engaged clears NEED)" {

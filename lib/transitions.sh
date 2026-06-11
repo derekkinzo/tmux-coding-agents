@@ -119,18 +119,15 @@ transitions::next() {
 
   case "$event" in
     UserPromptSubmit | PreToolUse | PostToolUse)
-      # Sticky waiting: once a pane has signalled that it needs the user
-      # (permission prompt, question on Stop), tool-flow events (PreToolUse
-      # etc.) MUST NOT silently move it back to "working". Otherwise a
-      # Notification event lasts only until the user clicks the prompt and
-      # Claude resumes — a window typically too short to notice in the
-      # status bar. UserPromptSubmit is a strong signal that the human is
-      # back and engaging, so it does clear the wait.
-      if [ "$current" = "waiting" ] && [ "$event" != "UserPromptSubmit" ]; then
-        printf 'waiting'
-      else
-        printf 'working'
-      fi
+      # PreToolUse / PostToolUse / UserPromptSubmit all express "Claude is
+      # active right now". If the pane was previously 'waiting' (set by a
+      # permission_prompt Notification or a question-on-Stop heuristic),
+      # the act of running a tool means the human-needs-you signal has
+      # been resolved — the user clicked Allow, or answered the question,
+      # or otherwise unblocked the agent. Hold 'waiting' past that point
+      # and the indicator goes stale (live trace caught NEED stuck for
+      # 88+ seconds while tools streamed unchallenged).
+      printf 'working'
       ;;
     Notification)
       # Per DESIGN Section 4: only permission_prompt produces 'waiting'.

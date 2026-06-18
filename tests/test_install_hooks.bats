@@ -20,7 +20,7 @@ teardown() {
   jq -e . "$CLAUDE_SETTINGS" >/dev/null
 }
 
-@test "install-hooks wires all 6 events (no SessionStart per DESIGN §5.1)" {
+@test "install-hooks wires all 6 events (no SessionStart)" {
   cp "$FIXTURES/settings_empty.json" "$CLAUDE_SETTINGS"
   "$BIN/install-hooks" >/dev/null
   for ev in UserPromptSubmit PreToolUse PostToolUse Notification Stop SessionEnd; do

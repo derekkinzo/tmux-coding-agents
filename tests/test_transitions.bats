@@ -156,7 +156,7 @@ setup() {
 @test "Stop with ASCII semicolon NO LONGER recognized as question" {
   # We dropped the Greek-question-mark glyph match because semicolon is too
   # common in normal text/code. Genuine Greek interrogatives are rare; the
-  # tradeoff favors precision over recall (review wwbo2gfgl LOW).
+  # tradeoff favors precision over recall.
   payload='{"last_assistant_message":"Done; ready."}'
   run transitions::next claude working Stop "$payload"
   assert_output "idle"

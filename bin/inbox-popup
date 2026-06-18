@@ -215,7 +215,7 @@ sel="$(printf '%s\n' "$input" \
     --delimiter=$'\t' \
     --with-nth=1 \
     --accept-nth=2 \
-    --preview="bash $(printf '%q' "$PLUGIN_ROOT/bin/inbox-preview") {2}" \
+    --preview="bash $(printf '%q' "$PLUGIN_ROOT/bin/inbox-preview") {2} $(printf '%q' "$rows_file")" \
     --preview-window='right:55%:wrap' \
     --cycle \
     --no-input \

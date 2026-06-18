@@ -22,12 +22,16 @@ PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/render.sh"
 
-# Opportunistic GC: gather alive claude PIDs, hand to state::gc.
+# Opportunistic GC: drop rows whose claude PID is gone AND rows whose pane
+# no longer exists in any tmux session. The picker (bin/inbox-pick) used to
+# do the pane-existence sweep on every popup-open, but that put a LOCK_EX
+# rewrite on the keystroke→paint path; moving it here keeps the popup
+# lock-free and runs cleanup on the status-interval cadence instead.
 #
 # Cooldown: 4 seconds — slightly under the recommended 5s status-interval so
-# we don't end up running every-other-tick in steady state. state::gc is a
-# no-op when no alive PIDs are passed in, so an unset/empty pgrep result
-# leaves rows untouched (see lib/state.sh state::gc safety).
+# we don't run every-other-tick in steady state. state::gc and
+# state::gc_panes are no-ops when their inputs are empty (alive set / live
+# pane set), so an unset pgrep / no-tmux result leaves rows untouched.
 gc_if_due() {
   local cache_dir tag now last
   cache_dir="$(state::cache_dir)" 2>/dev/null || return 0
@@ -40,9 +44,14 @@ gc_if_due() {
     return 0
   fi
   printf '%s' "$now" >"$tag" 2>/dev/null || true
-  local alive
+  local alive live_panes
   alive="$(pgrep -u "$(id -u)" -x claude 2>/dev/null || true)"
   printf '%s\n' "$alive" | state::gc 2>/dev/null || true
+  live_panes="$(tmux list-panes -as -F '#{pane_id}' 2>/dev/null \
+    | awk '/^%[0-9]+$/' || true)"
+  if [ -n "$live_panes" ]; then
+    printf '%s\n' "$live_panes" | state::gc_panes 2>/dev/null || true
+  fi
 }
 
 gc_if_due
@@ -70,7 +79,7 @@ if command -v tmux >/dev/null 2>&1; then
   fmt="$(tmux show-option -gqv '@inbox-status-format' 2>/dev/null || true)"
 fi
 
-# Pass output through render::scrub_ansi per DESIGN §9 step 5: defense against
-# any control bytes that might have slipped through.
+# Pass output through render::scrub_ansi: defense against any control
+# bytes that might have slipped through.
 render::status "$waiting" "$working" "$idle" "$fmt" | render::scrub_ansi
 exit 0

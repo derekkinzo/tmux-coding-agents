@@ -151,7 +151,7 @@ run_hook() {
   [ ! -e /tmp/RCE-NOPE-1 ]
 }
 
-@test "hook drops payload at JSON-depth>8 (DESIGN §15 rule #2)" {
+@test "hook drops payload at JSON-depth>8" {
   # Build a 12-deep nested object. jq depth count starts at 0 (root), so 12
   # levels makes max(paths|length) = 12 > 8 → drop.
   deep=$(printf '{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":{"a":1}}}}}}}}}}}}')
@@ -173,6 +173,25 @@ run_hook() {
     rows=$(awk 'NR>1' "$(state::tsv_path)" | wc -l | tr -d ' ')
   fi
   assert_equal "$rows" "0"
+}
+
+@test "hook carries forward project, pid, transcript_path from prior row when payload omits them" {
+  # Pins the IFS=$'\t' read single-pass extraction in bin/hook. The hook must
+  # carry forward project / pid / tpath fields from the existing TSV row when
+  # the inbound event has empty cwd and empty transcript_path. If the
+  # column-order in the read changes, one of these assertions flips.
+  source "$LIB/state.sh"
+  state::upsert '%17' 'claude' 'working' '1700000000' '12345' 'myproj' '/tmp/foo.jsonl'
+  # Stop with a clean message (idle transition) and no cwd / transcript_path.
+  echo '{"hook_event":"Stop","last_assistant_message":"done"}' \
+    | TMUX_PANE='%17' "$BIN/hook" Stop
+  tsv="$(state::tsv_path)"
+  pid_after=$(awk -F'\t' '$1=="%17" {print $5}' "$tsv")
+  proj_after=$(awk -F'\t' '$1=="%17" {print $6}' "$tsv")
+  tpath_after=$(awk -F'\t' '$1=="%17" {print $7}' "$tsv")
+  assert_equal "$pid_after" "12345"
+  assert_equal "$proj_after" "myproj"
+  assert_equal "$tpath_after" "/tmp/foo.jsonl"
 }
 
 @test "hook TSV column positions are correct (regression: was off-by-one)" {

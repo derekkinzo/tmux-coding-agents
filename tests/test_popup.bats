@@ -151,6 +151,36 @@ EOF
   esac
 }
 
+@test "inbox-popup --preview command passes both pane_id and rows_file" {
+  # Performance regression guard. fzf's --preview is invoked once per
+  # highlighted row; if the command line drops the rows_file path, every
+  # arrow keypress falls back to state::read which acquires LOCK_SH and
+  # rewrites the popup-paint critical path back into a flock-bound loop.
+  # Assert the source still wires both arguments through.
+  if ! grep -nE -- '--preview="bash .*inbox-preview.* \{2\} .*rows_file' "$BIN/inbox-popup" >/dev/null; then
+    echo "bin/inbox-popup --preview must pass both {2} and the rows_file path."
+    grep -nE -- '--preview=' "$BIN/inbox-popup" || true
+    return 1
+  fi
+}
+
+@test "state::gc_panes runs in inbox-status, not inbox-pick" {
+  # Performance regression guard with TWO assertions:
+  #   1. inbox-pick must NOT call gc_panes (LOCK_EX rewrite on the keystroke
+  #      → popup-paint path is what made the popup hang).
+  #   2. inbox-status MUST call gc_panes (otherwise stale rows accumulate
+  #      forever after a tmux server restart — pid-based gc keeps pid=0
+  #      rows by design).
+  if grep -nE 'state::gc_panes' "$BIN/inbox-pick"; then
+    echo "bin/inbox-pick must not call state::gc_panes (LOCK_EX on every popup open)."
+    return 1
+  fi
+  if ! grep -qE 'state::gc_panes' "$BIN/inbox-status"; then
+    echo "bin/inbox-status must call state::gc_panes — otherwise stale-pane GC never runs."
+    return 1
+  fi
+}
+
 @test "inbox-popup exits cleanly with no rows file" {
   err="${BATS_TEST_TMPDIR}/err.log"
   run "$BIN/inbox-popup" "/nonexistent/file"

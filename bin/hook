@@ -108,7 +108,7 @@ if ! printf '%s' "$payload" | jq -e . >/dev/null 2>&1; then
   exit 0
 fi
 
-# JSON depth cap (DESIGN §15 rule #2): refuse payloads nested beyond 8 levels.
+# JSON depth cap: refuse payloads nested beyond 8 levels.
 # Computed via jq walking the tree; cheap on payloads that already passed
 # parse validation. Reject silently to avoid feeding pathological payloads
 # any further into our pipeline.
@@ -150,9 +150,14 @@ tpath="$(jsonpb::peek "$payload" 'transcript_path')"
 # $current_row simply means "we don't know the prior state" — the transition
 # function handles that as "untracked".
 current_state=""
+current_pid=""
+current_project=""
+current_tpath=""
 current_row="$(state::read 2>/dev/null | awk -F'\t' -v p="$pane_id" '$1 == p { print; exit }')"
 if [ -n "$current_row" ]; then
-  current_state="$(printf '%s' "$current_row" | awk -F'\t' '{print $3}')"
+  # Single-pass field extraction. TSV schema fixed at:
+  #   1=pane_id 2=kind 3=status 4=since 5=pid 6=project 7=transcript_path
+  IFS=$'\t' read -r _ _ current_state _ current_pid current_project current_tpath <<<"$current_row"
 fi
 
 # Compute new state. Pure function.
@@ -184,16 +189,11 @@ elif [ -n "$new_state" ]; then
   if [ -n "$cwd" ]; then
     local_project="$(detect::pane_project "$cwd")"
   fi
-  # TSV data rows: 1=pane_id, 2=kind, 3=status, 4=since, 5=pid, 6=project, 7=transcript_path
-  if [ -z "$local_project" ] && [ -n "$current_row" ]; then
-    local_project="$(printf '%s' "$current_row" | awk -F'\t' '{print $6}')"
-  fi
-  if [ -z "$tpath" ] && [ -n "$current_row" ]; then
-    tpath="$(printf '%s' "$current_row" | awk -F'\t' '{print $7}')"
-  fi
-  if [ -z "$session_pid" ] && [ -n "$current_row" ]; then
-    session_pid="$(printf '%s' "$current_row" | awk -F'\t' '{print $5}')"
-  fi
+  # Carry forward fields that the new event didn't supply, using values
+  # already extracted from current_row (single-pass, no per-field awk forks).
+  [ -z "$local_project" ] && local_project="$current_project"
+  [ -z "$tpath" ] && tpath="$current_tpath"
+  [ -z "$session_pid" ] && session_pid="$current_pid"
   # Strip control bytes from project + tpath (defense in depth).
   local_project="$(printf '%s' "$local_project" | LC_ALL=C tr -d '\000-\037\177')"
   tpath="$(printf '%s' "$tpath" | LC_ALL=C tr -d '\000-\037\177')"
@@ -204,7 +204,7 @@ elif [ -n "$new_state" ]; then
   log_tail="event=$event"
   [ -n "$notif_kind" ] && log_tail="$log_tail kind=$notif_kind"
   if [ -n "${TMUX_CODING_AGENTS_DRY_RUN:-}" ]; then
-    # DESIGN §8: dry-run mode — log the would-be transition but don't mutate.
+    # Dry-run mode — log the would-be transition but don't mutate.
     hook_log "DRY pane=$pane_id ${current_state:--} → $new_state $log_tail"
   else
     state::upsert \

@@ -53,7 +53,7 @@ setup() {
   assert_failure
 }
 
-@test "state::upsert rejects backslash-escape in field (RCE regression: review wwbo2gfgl CRITICAL)" {
+@test "state::upsert rejects backslash-escape in field (RCE regression)" {
   # An attacker-controlled JSON value like "/tmp/foo\\n%99'; touch /tmp/x; echo '"
   # is decoded by jq to a 2-byte sequence backslash+n. Without strict
   # validation, awk -v on the upsert path expanded that to a real newline,
@@ -68,7 +68,7 @@ setup() {
   assert_failure
 }
 
-@test "state::upsert refuses when state.tsv is a symlink (review wwbo2gfgl HIGH)" {
+@test "state::upsert refuses when state.tsv is a symlink" {
   # Symlink redirection attack: attacker plants ~/.cache/tmux-coding-agents/
   # state.tsv -> /etc/passwd; without the L-test, our writes would land in
   # the symlink target.
@@ -94,10 +94,10 @@ setup() {
   assert_equal "$perm" "700"
 }
 
-@test "state::gc_panes rewrites TSV dropping rows whose pane is not alive (review wzrzsw2vu HIGH)" {
-  # Lazy GC contract per DESIGN §4 / §6.4 / §10: when a pane disappears from
-  # tmux (e.g., closed window or tmux restart), the TSV must be rewritten on
-  # the next picker open — not just filtered in-memory.
+@test "state::gc_panes rewrites TSV dropping rows whose pane is not alive" {
+  # Lazy GC contract: when a pane disappears from tmux (closed window or
+  # server restart), the TSV must be rewritten on the next sweep, not just
+  # filtered in-memory.
   state::upsert '%10' 'claude' 'waiting' '1700000000' '1' 'live' ''
   state::upsert '%99' 'claude' 'working' '1700000100' '2' 'dead-1' ''
   state::upsert '%100000' 'claude' 'idle' '1700000200' '3' 'dead-2-big-id' ''
@@ -192,8 +192,8 @@ setup() {
 @test "state::gc is a no-op when alive set is empty (safety guarantee)" {
   # If pgrep returns nothing (no Claude running), GC must NOT wipe rows —
   # otherwise inbox-status's opportunistic GC would clear the inbox the moment
-  # every Claude session is paused. See bin/inbox-status review wk9eyqh1m,
-  # critical finding "gc_if_due wipes ALL tracked panes when pgrep returns empty".
+  # every Claude session is paused — gc_if_due would wipe all tracked panes
+  # when pgrep returns empty.
   state::upsert '%17' 'claude' 'waiting' '1700000000' '99999999' 'a' ''
   state::upsert '%18' 'claude' 'working' '1700000100' '99999998' 'b' ''
   printf '' | state::gc
@@ -210,6 +210,25 @@ setup() {
 @test "state::snapshot is a working alias for state::read" {
   state::upsert '%17' 'claude' 'waiting' '1700000000' '12345' 'foo' ''
   diff <(state::snapshot) <(state::read)
+}
+
+@test "TSV schema round-trip: column order is pane_id, kind, status, since, pid, project, transcript_path" {
+  # Canonical schema pin. Several call sites parse rows via
+  # `IFS=$'\t' read -r pane_id kind status since pid project tpath`; if the
+  # column order ever drifts those parsers extract the wrong fields silently.
+  # Upsert with seven distinguishable values, read back, and assert each
+  # named field lands in the documented column.
+  state::upsert '%17' 'claude' 'waiting' '1700000000' '12345' 'myproj' '/tmp/foo.jsonl'
+  row="$(state::read | awk -F'\t' '$1=="%17" {print; exit}')"
+  [ -n "$row" ]
+  IFS=$'\t' read -r pane_id kind status since pid project tpath <<<"$row"
+  assert_equal "$pane_id" "%17"
+  assert_equal "$kind" "claude"
+  assert_equal "$status" "waiting"
+  assert_equal "$since" "1700000000"
+  assert_equal "$pid" "12345"
+  assert_equal "$project" "myproj"
+  assert_equal "$tpath" "/tmp/foo.jsonl"
 }
 
 @test "concurrent upserts don't corrupt the TSV" {

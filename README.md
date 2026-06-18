@@ -76,7 +76,7 @@ The installer is idempotent and edits `~/.claude/settings.json`. Set
 `CLAUDE_SETTINGS=/path/to/file` to target a different settings file.
 Symlinked settings files are preserved.
 
-### 3. (Optional) Add the status segment
+### 3. Add the status segment
 
 ```tmux
 set -ag status-right ' #(~/.tmux/plugins/tmux-coding-agents/bin/inbox-status)'
@@ -87,6 +87,10 @@ Keep the leading space — it separates this segment from whatever comes before
 it. `-ag` *appends* so existing `status-right` segments are preserved (a bare
 `-g` would clobber them). tmux's default `status-interval` is 15s; bumping it
 to 5 keeps the counter snappy.
+
+The status segment also runs garbage collection of stale rows (closed panes,
+exited Claude processes) on a 4-second cooldown. Skipping this step is
+supported but means dead rows accumulate until you restart tmux.
 
 ## Usage
 

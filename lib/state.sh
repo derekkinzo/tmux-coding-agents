@@ -43,7 +43,7 @@ if [ -z "${STATE_TSV_VERSION:-}" ]; then
 fi
 
 # Resolve cache dir; create if missing; refuse to use it if it's a symlink.
-# SECURITY (review wwbo2gfgl HIGH/MEDIUM):
+# SECURITY:
 #   - if the path exists as a symlink → refuse (could redirect writes)
 #   - if it exists with permissive mode (group/other read/write/exec) → tighten
 #     to 0700. This handles upgrade paths where an older umask left it at 0755
@@ -94,7 +94,7 @@ _state_ensure_header() {
 # Rejects:
 #   - tab/newline/CR (would corrupt the TSV row directly)
 #   - any literal backslash (would be re-expanded by awk -v as \n/\t/\r/\\,
-#     allowing TSV row injection — see review wwbo2gfgl critical finding).
+#     allowing TSV row injection).
 #     Even though _state_do_upsert/remove now use ENVIRON instead of -v,
 #     refusing backslash at validation is defense in depth and gives a clear
 #     contract: project names and transcript paths must be backslash-free
@@ -200,7 +200,7 @@ _state_do_upsert() {
   tsv="$(state::tsv_path)" || return 1
   # SECURITY: refuse to write through a symlink. Without this, an attacker who
   # can place a symlink at $XDG_CACHE_HOME/tmux-coding-agents/state.tsv can
-  # cause our writes to land in arbitrary files (review wwbo2gfgl HIGH).
+  # cause our writes to land in arbitrary files.
   if [ -L "$tsv" ]; then
     return 1
   fi

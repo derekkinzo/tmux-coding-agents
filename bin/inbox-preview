@@ -1,37 +1,45 @@
 #!/usr/bin/env bash
 # bin/inbox-preview — fzf preview content for a single tracked pane.
 #
-# Usage:  inbox-preview <pane_id>
+# Usage:  inbox-preview <pane_id> [rows_file]
 # Stdout: a multi-line preview block:
 #           <header line: state · project · age>
 #           <separator>
 #           <last N lines of the pane's visible terminal, ANSI-preserved>
 #         When the pane is no longer alive, prints "(pane closed)".
 #
-# This is invoked by fzf via --preview, once per highlighted row. It must
-# be cheap (forks: tmux capture-pane + a couple of awks) and never blocks.
+# fzf invokes this once per highlighted row, so it must be cheap. When
+# rows_file is supplied (the popup-open snapshot), the row lookup is a
+# single grep over the file with no flock acquisition. Without rows_file
+# (direct invocation, e.g. tests) we fall back to lib/state.sh.
 
 set -uo pipefail
 
 PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
-. "$PLUGIN_ROOT/lib/state.sh"
-# shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/render.sh"
 
 pane_id="${1:-}"
+rows_file="${2:-}"
 [[ "$pane_id" =~ ^%[0-9]+$ ]] || {
   printf '—\n'
   exit 0
 }
 
-# Look up our row in state.tsv. If not found, fall back to bare-pane preview.
-row="$(state::read 2>/dev/null | awk -F'\t' -v p="$pane_id" '$1 == p { print; exit }' || true)"
+# Look up our row. Prefer the snapshot file (no flock); fall back to
+# state::read on direct invocation.
+if [ -n "$rows_file" ] && [ -r "$rows_file" ]; then
+  row="$(awk -F'\t' -v p="$pane_id" '$1 == p { print; exit }' "$rows_file" 2>/dev/null || true)"
+else
+  # shellcheck disable=SC1091
+  . "$PLUGIN_ROOT/lib/state.sh"
+  row="$(state::read 2>/dev/null | awk -F'\t' -v p="$pane_id" '$1 == p { print; exit }' || true)"
+fi
 
 if [ -n "$row" ]; then
-  status="$(printf '%s' "$row" | awk -F'\t' '{print $3}')"
-  since="$(printf '%s' "$row" | awk -F'\t' '{print $4}')"
-  project="$(printf '%s' "$row" | awk -F'\t' '{print $6}')"
+  # Single-pass field extraction. TSV schema is fixed at:
+  #   1=pane_id 2=kind 3=status 4=since 5=pid 6=project 7=transcript_path
+  IFS=$'\t' read -r _ _ status since _ project _ <<<"$row"
   case "$since" in '' | *[!0-9]*) since=0 ;; esac
   now="$(date +%s)"
   age="$(render::ago "$((now - since))")"

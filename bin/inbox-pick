@@ -16,8 +16,6 @@ set -uo pipefail
 PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/state.sh"
-# shellcheck disable=SC1091
-. "$PLUGIN_ROOT/lib/render.sh"
 
 SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 
@@ -56,60 +54,21 @@ if ! hooks_installed; then
   exit 0
 fi
 
-# Get current tracked panes (sorted: waiting > working > idle).
+# Read tracked panes once under LOCK_SH and snapshot to a tempfile.
 #
-# SECURITY (review wwbo2gfgl CRITICAL): every row is filtered through a strict
-# `^%[0-9]+$` regex on the pane_id column. A row with a malformed pane_id is
-# dropped (and logged via debug if enabled) rather than processed, because the
-# pane_id is interpolated into tmux format strings further down. State.sh
-# already validates writes, so this is defense in depth against any future
-# regression that lets a bad value through.
+# SECURITY: every row is filtered through `^%[0-9]+$` on the pane_id column.
+# A malformed pane_id is dropped because pane_id is interpolated into tmux
+# format strings downstream. State.sh validates writes; this is defense in
+# depth against any future regression.
+#
+# PERFORMANCE: bin/inbox-preview reads from this snapshot file (no flock per
+# fzf arrow keypress) instead of calling state::read for every preview render.
+# GC of stale rows is handled by bin/inbox-status on its 4-second cooldown,
+# not on every popup-open — keeping the keystroke→popup-paint path lock-free
+# beyond a single LOCK_SH.
 rows="$(state::read 2>/dev/null \
   | awk -F'\t' '$1 ~ /^%[0-9]+$/' || true)"
 if [ -z "$rows" ]; then
-  tmux display-message "tmux-coding-agents: no Claude sessions tracked yet"
-  exit 0
-fi
-
-# Lazy GC of stale rows: drop entries whose pane no longer exists in any tmux
-# session. DESIGN §4 / §6.4 / §10 require this be a REAL state.tsv rewrite,
-# not just an in-memory filter — so a tmux restart eventually empties the TSV
-# instead of accumulating dead rows forever.
-#
-# We pipe `tmux list-panes` straight into state::gc_panes, which atomically
-# rewrites state.tsv under LOCK_EX dropping any row whose pane_id is not in
-# the live set. Then re-read.
-live_pane_ids="$(tmux list-panes -as -F '#{pane_id}' 2>/dev/null \
-  | awk '/^%[0-9]+$/')"
-if [ -n "$live_pane_ids" ]; then
-  printf '%s\n' "$live_pane_ids" | state::gc_panes 2>/dev/null || true
-  rows="$(state::read 2>/dev/null \
-    | awk -F'\t' '$1 ~ /^%[0-9]+$/' || true)"
-fi
-if [ -z "$rows" ]; then
-  tmux display-message "tmux-coding-agents: no Claude sessions tracked yet"
-  exit 0
-fi
-
-# Build a sorted list of pane_ids, with sort-key prefixed (status rank, then
-# since_epoch desc). Pipe through awk → sort → cut.
-sorted_pane_ids="$(
-  printf '%s\n' "$rows" \
-    | awk -F'\t' '{
-        # rank: 0 waiting, 1 working, 2 idle/other
-        s = $3
-        if (s == "waiting") r = 0
-        else if (s == "working") r = 1
-        else r = 2
-        # secondary: newer first (use 9999999999 - epoch for ascending sort)
-        inv = 9999999999 - $4
-        printf "%d\t%010d\t%s\n", r, inv, $1
-      }' \
-    | sort -t$'\t' -k1,1n -k2,2n \
-    | cut -f3
-)"
-
-if [ -z "$sorted_pane_ids" ]; then
   tmux display-message "tmux-coding-agents: no Claude sessions tracked yet"
   exit 0
 fi
@@ -120,11 +79,7 @@ fi
 #   - draws a NEED/WORK/IDLE grouped picker with right-side preview
 #   - prints the chosen pane_id to its stdout (empty on cancel)
 #
-# We capture stdout via a redirect file because tmux display-popup does not
-# pipe the child's stdout back to the caller.
-# mktemp without -t (portable across BSD/macOS and GNU). BSD mktemp's -t
-# treats the suffix as a prefix; GNU's -t selects $TMPDIR. The explicit
-# template form works identically on both.
+# mktemp without -t (portable across BSD/macOS and GNU).
 rows_file="$(mktemp "${TMPDIR:-/tmp}/tca-rows.XXXXXX")"
 out_file="$(mktemp "${TMPDIR:-/tmp}/tca-pick.XXXXXX")"
 trap 'rm -f "$rows_file" "$out_file"' EXIT

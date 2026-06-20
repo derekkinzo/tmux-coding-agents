@@ -219,3 +219,77 @@ EOF
   bak_count=$(ls "${CLAUDE_SETTINGS}".bak.* 2>/dev/null | wc -l | tr -d ' ')
   assert_equal "$bak_count" "0"
 }
+
+@test "uninstall-hooks preserves dotfiles symlink (write through cat, not mv)" {
+  # Matches the install-side symlink test. The uninstaller must overwrite
+  # the symlink target via cat rather than mv, so the symlink inode is
+  # preserved and the user's dotfiles workflow doesn't break.
+  real_target="${BATS_TEST_TMPDIR}/dotfiles/settings.json"
+  mkdir -p "$(dirname "$real_target")"
+  cp "$FIXTURES/settings_with_user_hooks.json" "$real_target"
+  rm -f "$CLAUDE_SETTINGS"
+  ln -s "$real_target" "$CLAUDE_SETTINGS"
+  "$BIN/install-hooks" >/dev/null
+  inode_before=$(stat -c %i "$CLAUDE_SETTINGS" 2>/dev/null || stat -f %i "$CLAUDE_SETTINGS")
+  "$BIN/uninstall-hooks" >/dev/null
+  [ -L "$CLAUDE_SETTINGS" ]
+  inode_after=$(stat -c %i "$CLAUDE_SETTINGS" 2>/dev/null || stat -f %i "$CLAUDE_SETTINGS")
+  assert_equal "$inode_after" "$inode_before"
+  # Our hooks are gone from the real target.
+  ours=$(jq -r '[.hooks[]?[]?.hooks[]?.command // empty] | join(" ")' "$real_target" \
+    | grep -c 'tmux-coding-agents/bin/hook' || true)
+  assert_equal "$ours" "0"
+}
+
+@test "uninstall-hooks refuses to write if input is invalid JSON" {
+  # Matches the install-side test. Uninstall must validate input before
+  # any mutation so a corrupt settings file is left exactly as found.
+  echo '{bad json' > "$CLAUDE_SETTINGS"
+  run "$BIN/uninstall-hooks"
+  assert_failure
+  content=$(cat "$CLAUDE_SETTINGS")
+  assert_equal "$content" "{bad json"
+}
+
+@test "uninstall-hooks --restore refuses corrupted .bak.* (does not overwrite)" {
+  # If the most recent .bak.* is itself broken JSON, restore must REFUSE
+  # rather than blow up the live settings.json with garbage.
+  cp "$FIXTURES/settings_with_user_hooks.json" "$CLAUDE_SETTINGS"
+  pre_hash=$(jq -S -c . "$CLAUDE_SETTINGS")
+  # Plant a corrupted .bak with a future-looking timestamp so it sorts first
+  # under `ls -t`.
+  echo '{not json' > "${CLAUDE_SETTINGS}.bak.99999999999"
+  run "$BIN/uninstall-hooks" --restore
+  assert_failure
+  # Live file must be untouched.
+  post_hash=$(jq -S -c . "$CLAUDE_SETTINGS")
+  assert_equal "$post_hash" "$pre_hash"
+}
+
+@test "uninstall-hooks removes our entries from legacy nested-object shape" {
+  # Mirror of the install-side legacy-shape test. The uninstaller's jq
+  # filter must normalize the legacy {matcher: [...]} form to the array
+  # shape before stripping our entries, OR walk both shapes; either way
+  # the user's legacy entry must survive and ours must be gone.
+  cat > "$CLAUDE_SETTINGS" <<'EOF'
+{
+  "hooks": {
+    "PreToolUse": {
+      "Bash": [
+        {"type": "command", "command": "/usr/bin/legacy-tool"}
+      ]
+    }
+  }
+}
+EOF
+  "$BIN/install-hooks" >/dev/null
+  "$BIN/uninstall-hooks" >/dev/null
+  # User's legacy tool survives.
+  preserved=$(jq -r '[.hooks[]?[]?.hooks[]?.command // empty] | join(" ")' "$CLAUDE_SETTINGS")
+  case "$preserved" in *"/usr/bin/legacy-tool"*) ;; *) echo "lost legacy entry: $preserved" ; false ;; esac
+  # Our hooks are gone.
+  case "$preserved" in
+    *"tmux-coding-agents/bin/hook"*) echo "uninstall left our hook: $preserved" ; false ;;
+    *) ;;
+  esac
+}

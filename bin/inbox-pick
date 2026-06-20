@@ -16,40 +16,11 @@ set -uo pipefail
 PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 . "$PLUGIN_ROOT/lib/state.sh"
+# shellcheck disable=SC1091
+. "$PLUGIN_ROOT/lib/hooks.sh"
 
-SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
-
-# Quick check: are our hooks wired? Use a sentinel file to avoid re-parsing
-# settings.json on every keypress (cached after first successful install).
-hooks_installed() {
-  local cache_dir tag mtime_settings mtime_tag
-  cache_dir="$(state::cache_dir)" 2>/dev/null || return 1
-  tag="$cache_dir/.hooks-installed"
-  if [ -r "$tag" ] && [ -r "$SETTINGS" ]; then
-    mtime_settings="$(date -r "$SETTINGS" +%s 2>/dev/null || stat -c %Y "$SETTINGS" 2>/dev/null || echo 0)"
-    mtime_tag="$(cat "$tag" 2>/dev/null || echo 0)"
-    case "$mtime_tag" in *[!0-9]* | '') mtime_tag=0 ;; esac
-    if [ "$mtime_tag" -ge "$mtime_settings" ]; then
-      return 0
-    fi
-  fi
-  if [ -r "$SETTINGS" ] \
-    && command -v jq >/dev/null 2>&1 \
-    && jq -e '
-       (.hooks // {}) | to_entries | any(.value | type == "array" and any(
-         .hooks // [] | any(.command // "" | contains("tmux-coding-agents/bin/hook"))))
-     ' "$SETTINGS" >/dev/null 2>&1; then
-    # Cache the verification.
-    if [ -n "$cache_dir" ]; then
-      mtime_settings="$(date -r "$SETTINGS" +%s 2>/dev/null || stat -c %Y "$SETTINGS" 2>/dev/null || echo 0)"
-      printf '%s' "$mtime_settings" >"$tag" 2>/dev/null || true
-    fi
-    return 0
-  fi
-  return 1
-}
-
-if ! hooks_installed; then
+# shellcheck disable=SC2119  # hooks::installed has a defaulting positional arg
+if ! hooks::installed; then
   tmux display-message "tmux-coding-agents: hooks not installed — run: $PLUGIN_ROOT/bin/install-hooks"
   exit 0
 fi

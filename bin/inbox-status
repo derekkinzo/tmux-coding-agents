@@ -57,8 +57,8 @@ gc_if_due() {
 gc_if_due
 state::sweep_orphan_tmps
 
-# Single pass through state::read — halves lock overhead vs three state::count
-# calls. Lock-timeout / corrupt TSV → counts default to 0 (segment empty).
+# Single pass through state::read counts all three statuses in one awk.
+# Lock-timeout / corrupt TSV → counts default to 0 (segment empty).
 counts="$(state::read 2>/dev/null \
   | awk -F'\t' '
       $3 == "waiting" { w++ }

@@ -110,12 +110,27 @@ if [ "$mode" = "restore" ]; then
     exit 1
   fi
   lock_held=1
+  # Pre-restore backup: replacing settings.json from the chosen .bak.* is
+  # destructive. If the user picked the wrong backup or the backup is
+  # subtly broken, the previous state would be unrecoverable. Snapshot the
+  # current file under a distinct namespace (.prerestore.*) so the next
+  # --restore won't pick it as a candidate backup, but the user still has
+  # a way to undo this restore.
+  prerestore="$settings_target.prerestore.$(date +%s).$$"
+  if [ -f "$settings_target" ]; then
+    if [ "$preserve_symlink" = "1" ]; then
+      cat "$settings_target" >"$prerestore" 2>/dev/null || true
+    else
+      cp "$settings_target" "$prerestore" 2>/dev/null || true
+    fi
+  fi
   if [ "$preserve_symlink" = "1" ]; then
     cat "$bak" >"$settings_target"
   else
     cp "$bak" "$settings_target"
   fi
   printf 'tmux-coding-agents: restored %s from %s\n' "$SETTINGS" "$bak"
+  [ -f "$prerestore" ] && printf 'tmux-coding-agents: previous state saved to %s\n' "$prerestore"
   exit 0
 fi
 

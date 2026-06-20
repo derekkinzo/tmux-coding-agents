@@ -146,18 +146,6 @@ setup() {
   assert_equal "$remaining" "%18"
 }
 
-@test "state::count returns correct count" {
-  state::upsert '%17' 'claude' 'waiting' '1700000000' '12345' 'foo' ''
-  state::upsert '%18' 'claude' 'waiting' '1700000100' '12346' 'bar' ''
-  state::upsert '%19' 'claude' 'working' '1700000200' '12347' 'baz' ''
-  run state::count waiting
-  assert_output "2"
-  run state::count working
-  assert_output "1"
-  run state::count idle
-  assert_output "0"
-}
-
 @test "state::list_by_status sorts by since_epoch desc" {
   state::upsert '%17' 'claude' 'waiting' '1700000000' '12345' 'a' ''
   state::upsert '%18' 'claude' 'waiting' '1700000100' '12346' 'b' ''
@@ -205,11 +193,6 @@ setup() {
   run state::read
   assert_success
   assert_output ""
-}
-
-@test "state::snapshot is a working alias for state::read" {
-  state::upsert '%17' 'claude' 'waiting' '1700000000' '12345' 'foo' ''
-  diff <(state::snapshot) <(state::read)
 }
 
 @test "TSV schema round-trip: column order is pane_id, kind, status, since, pid, project, transcript_path" {

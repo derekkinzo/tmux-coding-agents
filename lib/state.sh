@@ -15,8 +15,6 @@
 #   state::upsert <pane_id> <kind> <status> <since_epoch> <pid> <project> <transcript_path>
 #   state::remove <pane_id>
 #   state::read                   - print all data rows (no header) under LOCK_SH
-#   state::snapshot               - alias for state::read
-#   state::count <status>         - count rows with the given status
 #   state::list_by_status <status> - print rows with given status, sorted by since_epoch desc
 #   state::gc <live_pids>         - remove rows whose pid is not in the live set
 #
@@ -281,16 +279,6 @@ state::read() {
 _state_do_read() {
   # $1 = lock_fd, $2 = tsv path
   awk 'NR > 1' "$2"
-}
-
-state::snapshot() {
-  state::read
-}
-
-# --- count ------------------------------------------------------------------
-state::count() {
-  local target="$1"
-  state::read | awk -F'\t' -v t="$target" '$3 == t' | wc -l | tr -d ' '
 }
 
 # --- list_by_status ---------------------------------------------------------

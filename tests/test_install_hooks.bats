@@ -180,6 +180,32 @@ EOF
   assert_equal "$post_hash" "$pre_hash"
 }
 
+@test "uninstall-hooks --restore writes a pre-restore backup of the current file" {
+  # Pre-restore backup pins the C12 fix: --restore must snapshot the
+  # current settings.json under a distinct .prerestore.* namespace before
+  # overwriting from the chosen .bak.*. Without this, picking the wrong
+  # backup is irreversible.
+  cp "$FIXTURES/settings_with_user_hooks.json" "$CLAUDE_SETTINGS"
+  "$BIN/install-hooks" >/dev/null
+  # Modify settings further so the current state is distinct from the .bak.
+  jq '.somethingElse = "added"' "$CLAUDE_SETTINGS" > "$CLAUDE_SETTINGS.new"
+  mv "$CLAUDE_SETTINGS.new" "$CLAUDE_SETTINGS"
+  pre_restore_hash=$(jq -S -c . "$CLAUDE_SETTINGS")
+  run "$BIN/uninstall-hooks" --restore
+  assert_success
+  # A .prerestore.* file must exist and match the pre-restore content.
+  prerestore_count=$(ls "${CLAUDE_SETTINGS}".prerestore.* 2>/dev/null | wc -l | tr -d ' ')
+  assert_equal "$prerestore_count" "1"
+  prerestore_file=$(ls "${CLAUDE_SETTINGS}".prerestore.* 2>/dev/null | head -1)
+  prerestore_content_hash=$(jq -S -c . "$prerestore_file")
+  assert_equal "$prerestore_content_hash" "$pre_restore_hash"
+  # The pre-restore file must NOT be in the .bak.* namespace, otherwise
+  # the next --restore would pick it as a candidate.
+  case "$prerestore_file" in
+    *.bak.*) echo "prerestore file landed in .bak.* namespace: $prerestore_file" ; return 1 ;;
+  esac
+}
+
 @test "uninstall-hooks: nothing-to-do path (no backup, no churn)" {
   cp "$FIXTURES/settings_with_user_hooks.json" "$CLAUDE_SETTINGS"
   before_mtime=$(stat -c %Y "$CLAUDE_SETTINGS" 2>/dev/null || stat -f %m "$CLAUDE_SETTINGS")

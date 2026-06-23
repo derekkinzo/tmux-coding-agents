@@ -206,6 +206,26 @@ EOF
   esac
 }
 
+@test "uninstall-hooks --restore is atomic: invalid .bak.* leaves live file untouched" {
+  # Atomicity pin: the restore writes to a same-dir tmpfile, validates JSON,
+  # then mv -fs into place. If the chosen .bak.* is not valid JSON, the
+  # staged tmpfile is rejected and the live settings.json must be byte-
+  # identical to its pre-restore state — no truncation, no partial write.
+  cp "$FIXTURES/settings_with_user_hooks.json" "$CLAUDE_SETTINGS"
+  "$BIN/install-hooks" >/dev/null
+  pre_hash=$(jq -S -c . "$CLAUDE_SETTINGS")
+  # Plant a corrupt .bak with a future timestamp so `ls -t` picks it first.
+  echo 'not valid JSON' > "${CLAUDE_SETTINGS}.bak.99999999999"
+  run "$BIN/uninstall-hooks" --restore
+  assert_failure
+  # Live file must still parse and match the pre-restore content.
+  post_hash=$(jq -S -c . "$CLAUDE_SETTINGS")
+  assert_equal "$post_hash" "$pre_hash"
+  # No partial tmpfile leaks in the settings dir.
+  leak_count=$(ls "$(dirname "$CLAUDE_SETTINGS")"/.settings.json.* 2>/dev/null | wc -l | tr -d ' ')
+  assert_equal "$leak_count" "0"
+}
+
 @test "uninstall-hooks: nothing-to-do path (no backup, no churn)" {
   cp "$FIXTURES/settings_with_user_hooks.json" "$CLAUDE_SETTINGS"
   before_mtime=$(stat -c %Y "$CLAUDE_SETTINGS" 2>/dev/null || stat -f %m "$CLAUDE_SETTINGS")

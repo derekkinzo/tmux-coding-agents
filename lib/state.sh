@@ -16,7 +16,9 @@
 #   state::remove <pane_id>
 #   state::read                   - print all data rows (no header) under LOCK_SH
 #   state::list_by_status <status> - print rows with given status, sorted by since_epoch desc
+#   state::sweep_orphan_tmps      - rm tmpfiles older than 1 min (writer-crash cleanup)
 #   state::gc <live_pids>         - remove rows whose pid is not in the live set
+#   state::gc_panes <live_panes>  - remove rows whose pane_id is not in the live tmux set
 #
 # Concurrency invariant:
 #   - writers acquire LOCK_EX with 200ms timeout
@@ -371,9 +373,9 @@ _state_do_gc() {
 
 # --- gc_panes ---------------------------------------------------------------
 # Remove rows whose pane_id (column 1) is NOT in the supplied alive-pane set.
-# Lazy garbage-collect via read-then-rewrite —
-# bin/inbox-pick calls this with `tmux list-panes` output
-# so a tmux restart (every pane gone) eventually empties the TSV.
+# Lazy garbage-collect via read-then-rewrite — bin/inbox-status calls this
+# from gc_if_due on its 4-second cooldown with `tmux list-panes` output, so
+# a tmux restart (every pane gone) eventually empties the TSV.
 #
 # Usage:
 #   tmux list-panes -as -F '#{pane_id}' | state::gc_panes

@@ -111,3 +111,33 @@ _sentinel_path() {
   recorded_mtime="$(cat "$(_sentinel_path)")"
   assert_equal "$recorded_mtime" "$expected_mtime"
 }
+
+@test "hooks::installed accepts legacy nested-object hook shape" {
+  # install-hooks normalizes legacy {matcher: [...]} object shape into the
+  # array shape on write, but a hand-edited or imported settings.json may
+  # still carry the legacy form with our hook present. The verifier must
+  # walk both shapes — otherwise the cache locks in a false-negative until
+  # the user runs install-hooks to re-normalize.
+  cat >"$CLAUDE_SETTINGS" <<'EOF'
+{"hooks":{"PreToolUse":{"Bash":[{"type":"command","command":"/path/to/tmux-coding-agents/bin/hook PreToolUse"}]}}}
+EOF
+  hooks::clear_sentinel
+  run hooks::installed
+  assert_success
+}
+
+@test "hooks::installed invalidates cache when settings mtime moves backward" {
+  # Regression guard for the mtime-equality fix: a file replacement that
+  # leaves the mtime LOWER than the sentinel (cp -p from dotfiles, restore
+  # from .bak.*, touch -t with an older time) must invalidate the cache
+  # rather than producing a false-positive hit. The pre-fix code used >=
+  # which would treat older content as "verified".
+  _write_wired_settings
+  hooks::clear_sentinel
+  hooks::installed
+  # Roll mtime BACKWARD to a fixed historical value and swap to unwired content.
+  _write_unwired_settings
+  touch -t 200001010000 "$CLAUDE_SETTINGS"
+  run hooks::installed
+  assert_failure
+}

@@ -112,25 +112,51 @@ if [ "$mode" = "restore" ]; then
   lock_held=1
   # Pre-restore backup: replacing settings.json from the chosen .bak.* is
   # destructive. If the user picked the wrong backup or the backup is
-  # subtly broken, the previous state would be unrecoverable. Snapshot the
+  # subtly broken, the previous state must be recoverable. Snapshot the
   # current file under a distinct namespace (.prerestore.*) so the next
-  # --restore won't pick it as a candidate backup, but the user still has
-  # a way to undo this restore.
+  # --restore won't pick it as a candidate backup. If the snapshot fails
+  # OR produces an empty file, abort BEFORE the destructive write — the
+  # user's current state is more valuable than a successful --restore.
   prerestore="$settings_target.prerestore.$(date +%s).$$"
   if [ -f "$settings_target" ]; then
-    if [ "$preserve_symlink" = "1" ]; then
-      cat "$settings_target" >"$prerestore" 2>/dev/null || true
-    else
-      cp "$settings_target" "$prerestore" 2>/dev/null || true
+    # The prerestore path is unique-per-invocation under mktemp's namespace,
+    # so it's always a fresh regular file — cp is safe regardless of whether
+    # $settings_target is a symlink (we're copying FROM, not TO, the link).
+    if ! cp "$settings_target" "$prerestore"; then
+      err "failed to create pre-restore backup at $prerestore; refusing to restore"
+      exit 1
+    fi
+    if [ ! -s "$prerestore" ]; then
+      rm -f "$prerestore" 2>/dev/null || true
+      err "pre-restore backup is empty (disk full?); refusing to restore"
+      exit 1
     fi
   fi
+  # Atomic restore: write to a same-dir tmpfile, validate, then mv -f. A
+  # mid-write failure leaves $settings_target untouched, matching the
+  # install-hooks atomic-rename pattern. The symlink branch deliberately
+  # uses `cat ... >tmp` (not `cp`) so the eventual mv-into-symlink chain
+  # preserves the user's dotfile inode.
+  restore_tmp="$(mktemp "$(dirname "$settings_target")/.settings.json.XXXXXX")"
+  if ! cat "$bak" >"$restore_tmp"; then
+    rm -f "$restore_tmp" 2>/dev/null || true
+    err "failed to stage restore from $bak"
+    exit 1
+  fi
+  if ! jq -e . "$restore_tmp" >/dev/null 2>&1; then
+    rm -f "$restore_tmp" 2>/dev/null || true
+    err "staged restore is not valid JSON; refusing to swap"
+    exit 1
+  fi
   if [ "$preserve_symlink" = "1" ]; then
-    cat "$bak" >"$settings_target"
+    cat "$restore_tmp" >"$settings_target"
+    rm -f "$restore_tmp" 2>/dev/null || true
   else
-    cp "$bak" "$settings_target"
+    mv -f "$restore_tmp" "$settings_target"
   fi
   printf 'tmux-coding-agents: restored %s from %s\n' "$SETTINGS" "$bak"
-  [ -f "$prerestore" ] && printf 'tmux-coding-agents: previous state saved to %s\n' "$prerestore"
+  [ -f "$prerestore" ] && [ -s "$prerestore" ] \
+    && printf 'tmux-coding-agents: previous state saved to %s\n' "$prerestore"
   exit 0
 fi
 

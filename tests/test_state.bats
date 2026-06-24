@@ -108,6 +108,41 @@ setup() {
   assert_equal "$remaining" "%10"
 }
 
+@test "state::gc_combined applies pane AND pid filters in one LOCK_EX pass" {
+  # %10 has live pid (1) AND live pane → keep
+  # %20 has live pid (2) but DEAD pane → drop (pane filter wins)
+  # %30 has DEAD pid (999) AND live pane → drop (pid filter)
+  # %40 has pid=0 (unknown) AND live pane → keep (pid=0 means "no info, defer to pane filter")
+  # %50 has live pid (1) AND dead pane → drop (pane filter wins)
+  state::upsert '%10' 'claude' 'waiting' '1700000000' '1'   'a' ''
+  state::upsert '%20' 'claude' 'waiting' '1700000100' '2'   'b' ''
+  state::upsert '%30' 'claude' 'working' '1700000200' '999' 'c' ''
+  state::upsert '%40' 'claude' 'idle'    '1700000300' '0'   'd' ''
+  state::upsert '%50' 'claude' 'idle'    '1700000400' '1'   'e' ''
+  alive_pids="$(printf '1\n2')"
+  alive_panes="$(printf '%%10\n%%30\n%%40')"
+  state::gc_combined "$alive_pids" "$alive_panes"
+  remaining=$(awk -F'\t' 'NR>1 {print $1}' "$(state::tsv_path)" | sort | tr '\n' ' ')
+  # %10 kept (live+live). %30 dropped (pid filter). %40 kept (pane only). %20, %50 dropped (dead pane).
+  assert_equal "$remaining" "%10 %40 "
+}
+
+@test "state::gc_combined no-op when alive_panes is empty (no authoritative info)" {
+  state::upsert '%10' 'claude' 'waiting' '1700000000' '1' 'a' ''
+  state::gc_combined "$(printf '1\n2')" ''
+  rows=$(awk 'NR>1' "$(state::tsv_path)" | wc -l | tr -d ' ')
+  assert_equal "$rows" "1"
+}
+
+@test "state::gc_combined with empty alive_pids degrades to pane-only filter" {
+  state::upsert '%10' 'claude' 'waiting' '1700000000' '999' 'a' ''
+  state::upsert '%20' 'claude' 'working' '1700000100' '888' 'b' ''
+  state::gc_combined '' "$(printf '%%10')"
+  remaining=$(awk -F'\t' 'NR>1 {print $1}' "$(state::tsv_path)" | sort | tr '\n' ' ')
+  # %10 kept (pane alive; pid filter not applied). %20 dropped (pane dead).
+  assert_equal "$remaining" "%10 "
+}
+
 @test "state::gc_panes is no-op when alive set is empty (safety, like state::gc)" {
   state::upsert '%10' 'claude' 'waiting' '1700000000' '1' 'a' ''
   printf '' | state::gc_panes

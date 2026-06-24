@@ -19,6 +19,7 @@
 #   state::sweep_orphan_tmps      - rm tmpfiles older than 1 min (writer-crash cleanup)
 #   state::gc <live_pids>         - remove rows whose pid is not in the live set
 #   state::gc_panes <live_panes>  - remove rows whose pane_id is not in the live tmux set
+#   state::gc_combined <live_pids> <live_panes>  - single-LOCK_EX combined GC
 #
 # Concurrency invariant:
 #   - writers acquire LOCK_EX with 200ms timeout
@@ -420,6 +421,85 @@ _state_do_gc_panes() {
       }
       NR == 1 { print; next }
       $1 in alive_set { print }
+    ' "$tsv" >"$tmp" || return 1
+
+  mv -f "$tmp" "$tsv" || return 1
+  return 0
+}
+
+# --- gc_combined ------------------------------------------------------------
+# Single-pass GC over both axes: drop rows whose pane_id is not in alive_panes
+# OR whose pid is non-empty/non-zero AND not in alive_pids. Equivalent to
+# state::gc_panes followed by state::gc, but takes ONE LOCK_EX, ONE awk pass,
+# ONE rewrite — halving the lock-held window and the tmpfile churn.
+#
+# Usage:
+#   state::gc_combined "$alive_pids" "$alive_panes"
+#     alive_pids   = newline-separated numeric PIDs (may be empty)
+#     alive_panes  = newline-separated tmux pane_ids matching ^%[0-9]+$
+#
+# Safety:
+#   - empty alive_panes is a no-op (no authoritative pane existence info)
+#   - empty alive_pids degrades to pane-only GC (caller has no claude info)
+state::gc_combined() {
+  local alive_pids="$1" alive_panes="$2"
+  # Sanitize PIDs.
+  case "$alive_pids" in
+    '' | $'\n') alive_pids="" ;;
+    *[!0-9$'\n']*)
+      alive_pids="$(printf '%s\n' "$alive_pids" | awk 'NF && /^[0-9]+$/')"
+      ;;
+  esac
+  # Sanitize panes.
+  case "$alive_panes" in
+    '' | $'\n') alive_panes="" ;;
+    *[!%0-9$'\n']*)
+      alive_panes="$(printf '%s\n' "$alive_panes" | awk 'NF && /^%[0-9]+$/')"
+      ;;
+  esac
+  if [ -z "$alive_panes" ]; then
+    return 0
+  fi
+  _state_with_lock -x _state_do_gc_combined "$alive_pids" "$alive_panes"
+}
+
+_state_do_gc_combined() {
+  local lock_fd="$1"
+  shift
+  local alive_pids="$1" alive_panes="$2"
+
+  local tsv tmp
+  tsv="$(state::tsv_path)" || return 1
+  if [ -L "$tsv" ]; then
+    return 1
+  fi
+  [ -f "$tsv" ] || return 0
+  tmp="$(_state_tmpfile_for "$tsv")"
+  # shellcheck disable=SC2064
+  trap "rm -f '$tmp' 2>/dev/null" RETURN
+
+  STATE_ALIVE_PIDS="$alive_pids" \
+    STATE_ALIVE_PANES="$alive_panes" \
+    awk -F'\t' '
+      BEGIN {
+        np = split(ENVIRON["STATE_ALIVE_PIDS"], pp, "\n")
+        for (i = 1; i <= np; i++) if (pp[i] != "") pid_set[pp[i]] = 1
+        npa = split(ENVIRON["STATE_ALIVE_PANES"], pa, "\n")
+        for (i = 1; i <= npa; i++) if (pa[i] != "") pane_set[pa[i]] = 1
+        have_pids = (length(pid_set) > 0)
+      }
+      NR == 1 { print; next }
+      {
+        # Pane existence is authoritative (always checked).
+        if (!($1 in pane_set)) next
+        # PID filter only applied when caller supplied alive_pids; rows with
+        # blank or 0 pid are kept (some hook payloads omit pid).
+        if (have_pids) {
+          pid = $5
+          if (pid != "" && pid != "0" && !(pid in pid_set)) next
+        }
+        print
+      }
     ' "$tsv" >"$tmp" || return 1
 
   mv -f "$tmp" "$tsv" || return 1

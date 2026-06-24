@@ -36,20 +36,38 @@ make_rows_file() {
   esac
 }
 
-@test "inbox-preview falls back gracefully when rows-file lacks the queried pane" {
-  # When the snapshot doesn't have the pane (e.g. row was GC'd between
-  # snapshot capture and preview render), preview must NOT consult state.tsv
-  # via flock — the whole point of the snapshot is to keep the keystroke
-  # path lock-free. It must also not error: fzf swallows nonzero exits and
-  # the user sees a flicker.
+@test "inbox-preview falls through to state::read when rows-file lacks the queried pane" {
+  # When the snapshot doesn't contain the pane (race: a new upsert landed
+  # after inbox-pick took the snapshot), preview must fall through to
+  # state::read so the user sees real data instead of '(untracked)'.
   rows="${BATS_TEST_TMPDIR}/rows.tsv"
   make_rows_file "$rows" '%17' 'other'
+  # Stage state.tsv with the queried pane via state::upsert.
+  source "$LIB/state.sh"
+  state::upsert '%42' 'claude' 'waiting' "$(($(date +%s) - 30))" '12345' 'racewinner' '/tmp/x.jsonl'
+  run "$BIN/inbox-preview" '%42' "$rows"
+  assert_success
+  case "$output" in
+    *racewinner*) ;;
+    *)
+      echo "expected fall-through to state::read to find 'racewinner'"
+      echo "output: $output"
+      return 1
+      ;;
+  esac
+}
+
+@test "inbox-preview renders (untracked) when neither snapshot nor state has the pane" {
+  # If the snapshot is empty AND state.tsv has no row for the pane, the
+  # header must safely degrade to '(untracked)' without erroring.
+  rows="${BATS_TEST_TMPDIR}/rows.tsv"
+  : >"$rows"
   run "$BIN/inbox-preview" '%42' "$rows"
   assert_success
   case "$output" in
     *'(untracked)'*) ;;
     *)
-      echo "expected '(untracked)' fallback header"
+      echo "expected '(untracked)' header for fully-unknown pane"
       echo "output: $output"
       return 1
       ;;

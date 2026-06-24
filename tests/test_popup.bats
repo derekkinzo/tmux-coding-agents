@@ -164,19 +164,18 @@ EOF
   fi
 }
 
-@test "state::gc_panes runs in inbox-status, not inbox-pick" {
+@test "pane-existence GC runs in inbox-status, not inbox-pick" {
   # Performance regression guard with TWO assertions:
-  #   1. inbox-pick must NOT call gc_panes (LOCK_EX rewrite on the keystroke
-  #      → popup-paint path is what made the popup hang).
-  #   2. inbox-status MUST call gc_panes (otherwise stale rows accumulate
-  #      forever after a tmux server restart — pid-based gc keeps pid=0
-  #      rows by design).
-  if grep -nE 'state::gc_panes' "$BIN/inbox-pick"; then
-    echo "bin/inbox-pick must not call state::gc_panes (LOCK_EX on every popup open)."
+  #   1. inbox-pick must NOT acquire LOCK_EX on the popup-paint path.
+  #   2. inbox-status MUST call gc_combined (or gc_panes) so stale-pane
+  #      rows are cleaned up — otherwise they accumulate forever after a
+  #      tmux server restart (pid-based gc keeps pid=0 rows by design).
+  if grep -nE 'state::(gc_panes|gc_combined)' "$BIN/inbox-pick"; then
+    echo "bin/inbox-pick must not acquire LOCK_EX (gc) on the keystroke→paint path."
     return 1
   fi
-  if ! grep -qE 'state::gc_panes' "$BIN/inbox-status"; then
-    echo "bin/inbox-status must call state::gc_panes — otherwise stale-pane GC never runs."
+  if ! grep -qE 'state::(gc_panes|gc_combined)' "$BIN/inbox-status"; then
+    echo "bin/inbox-status must run pane-existence GC — otherwise stale rows never get cleaned."
     return 1
   fi
 }

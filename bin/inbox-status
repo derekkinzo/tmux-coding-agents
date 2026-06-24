@@ -29,9 +29,14 @@ PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # lock-free and runs cleanup on the status-interval cadence instead.
 #
 # Cooldown: 4 seconds — slightly under the recommended 5s status-interval so
-# we don't run every-other-tick in steady state. state::gc and
-# state::gc_panes are no-ops when their inputs are empty (alive set / live
-# pane set), so an unset pgrep / no-tmux result leaves rows untouched.
+# we don't run every-other-tick in steady state. state::gc_combined is a
+# no-op when alive_panes is empty (no authoritative tmux info), so a
+# stalled IPC or no-tmux environment leaves rows untouched.
+#
+# IPC timeout: tmux list-panes is wrapped with `timeout 1s` where available
+# (coreutils / brew) so a stuck tmux server doesn't freeze the status bar
+# across all attached clients while the IPC stalls. The wrapper falls back
+# to a bare invocation when timeout is missing (busybox / minimal env).
 gc_if_due() {
   local cache_dir tag now last
   cache_dir="$(state::cache_dir)" 2>/dev/null || return 0
@@ -45,13 +50,15 @@ gc_if_due() {
   fi
   printf '%s' "$now" >"$tag" 2>/dev/null || true
   local alive live_panes
-  alive="$(pgrep -u "$(id -u)" -x claude 2>/dev/null || true)"
-  printf '%s\n' "$alive" | state::gc 2>/dev/null || true
-  live_panes="$(tmux list-panes -as -F '#{pane_id}' 2>/dev/null \
-    | awk '/^%[0-9]+$/' || true)"
-  if [ -n "$live_panes" ]; then
-    printf '%s\n' "$live_panes" | state::gc_panes 2>/dev/null || true
+  alive="$(pgrep -u "$UID" -x claude 2>/dev/null || true)"
+  if command -v timeout >/dev/null 2>&1; then
+    live_panes="$(timeout 1s tmux list-panes -as -F '#{pane_id}' 2>/dev/null \
+      | awk '/^%[0-9]+$/' || true)"
+  else
+    live_panes="$(tmux list-panes -as -F '#{pane_id}' 2>/dev/null \
+      | awk '/^%[0-9]+$/' || true)"
   fi
+  state::gc_combined "$alive" "$live_panes" 2>/dev/null || true
 }
 
 gc_if_due

@@ -27,10 +27,13 @@ rows_file="${2:-}"
 }
 
 # Look up our row. Prefer the snapshot file (no flock); fall back to
-# state::read on direct invocation.
+# state::read when the snapshot is absent OR doesn't contain the queried
+# pane (race: a fresh upsert landed after inbox-pick took the snapshot).
+row=""
 if [ -n "$rows_file" ] && [ -r "$rows_file" ]; then
   row="$(awk -F'\t' -v p="$pane_id" '$1 == p { print; exit }' "$rows_file" 2>/dev/null || true)"
-else
+fi
+if [ -z "$row" ]; then
   # shellcheck disable=SC1091
   . "$PLUGIN_ROOT/lib/state.sh"
   row="$(state::read 2>/dev/null | awk -F'\t' -v p="$pane_id" '$1 == p { print; exit }' || true)"

@@ -27,6 +27,25 @@ _hooks_mtime() {
     || echo 0
 }
 
+# Compute a compact cache fingerprint for the settings file: <mtime>:<crc>:<size>.
+# mtime is the cheap discriminator; <crc>:<size> from cksum (POSIX, ubiquitous,
+# ~0.2ms on a typical settings.json) is the sub-second tiebreaker that catches
+# same-wall-clock-second edits on coarse-mtime filesystems (HFS+, FAT, exFAT).
+# A missing/unreadable file fingerprints to "0::0".
+_hooks_fingerprint() {
+  local path="$1"
+  if [ ! -r "$path" ]; then
+    printf '0::0'
+    return 0
+  fi
+  local mtime sum
+  mtime="$(_hooks_mtime "$path")"
+  # cksum prints "<crc> <size> [path]"; we want the first two fields only.
+  sum="$(cksum <"$path" 2>/dev/null | awk '{ printf "%s:%s", $1, $2 }')"
+  [ -n "$sum" ] || sum=":"
+  printf '%s:%s' "$mtime" "$sum"
+}
+
 # The jq filter that detects our hook entries in settings.json. Walks both
 # the modern array-shaped event values AND the legacy nested-object shape
 # (e.g. .hooks.PreToolUse = {"Bash": [...]}) that install/uninstall-hooks
@@ -69,40 +88,39 @@ hooks::clear_sentinel() {
 
 hooks::installed() {
   local settings="${1:-${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}}"
-  local cache_dir tag mtime_at_entry mtime_tag
+  local cache_dir tag fp_at_entry fp_tag
   cache_dir="$(state::cache_dir 2>/dev/null)" || return 1
   tag="$cache_dir/.hooks-installed"
 
-  # Capture the settings-file mtime ONCE per call. The same value drives both
-  # the cache-validity check and the sentinel write — this closes a TOCTOU
-  # where a touch landing between jq running and the sentinel write would
-  # cause the sentinel to record an mtime newer than what jq actually
-  # verified, leading the next call to skip verification on unverified
-  # content.
-  if [ -r "$settings" ]; then
-    mtime_at_entry="$(_hooks_mtime "$settings")"
-  else
-    mtime_at_entry=0
-  fi
+  # Capture a compact fingerprint ONCE per call: <mtime>:<crc>:<size>. The
+  # same value drives both the cache-validity check and the sentinel write,
+  # closing a TOCTOU where a touch landing during jq would cause a future
+  # call to skip verification on content we never actually verified.
+  fp_at_entry="$(_hooks_fingerprint "$settings")"
 
-  # Sentinel hit: only when the cached mtime EXACTLY equals the settings
-  # file's current mtime. Equality (not >=) is the right check: a backward
-  # mtime change (cp -p from dotfiles, restore from .bak.*, touch -t) means
-  # the file has been replaced with content we haven't verified, and >= would
-  # produce a false-positive cache hit. Sentinel is a plain ASCII integer.
-  if [ -r "$tag" ] && [ "$mtime_at_entry" != "0" ]; then
-    mtime_tag="$(cat "$tag" 2>/dev/null || echo 0)"
-    case "$mtime_tag" in '' | *[!0-9]*) mtime_tag=0 ;; esac
-    if [ "$mtime_tag" = "$mtime_at_entry" ]; then
-      return 0
-    fi
-  fi
+  # Sentinel hit: exact-match on the full fingerprint. mtime alone is
+  # vulnerable to same-wall-clock-second edits on coarse filesystems (HFS+,
+  # FAT, exFAT) AND to backward mtime changes (cp -p, restore-from-bak,
+  # touch -t). The mtime+crc+size combination defends against both: a
+  # same-second edit changes the crc; a backward mtime moves the entire
+  # fingerprint away from the cached value.
+  case "$fp_at_entry" in
+    0:*) ;;
+    *)
+      if [ -r "$tag" ]; then
+        fp_tag="$(cat "$tag" 2>/dev/null || true)"
+        if [ -n "$fp_tag" ] && [ "$fp_tag" = "$fp_at_entry" ]; then
+          return 0
+        fi
+      fi
+      ;;
+  esac
 
-  # Cache miss → verify with jq. On success, record the mtime we captured
-  # BEFORE jq ran. If the file was touched during jq, the captured value is
-  # pre-touch; the next call will see a higher file mtime and re-verify.
+  # Cache miss → verify with jq. On success, record the fingerprint captured
+  # BEFORE jq ran. If the file was edited during jq, the captured fingerprint
+  # is pre-edit; the next call sees a different fingerprint and re-verifies.
   if hooks::_verify_uncached "$settings"; then
-    printf '%s' "$mtime_at_entry" >"$tag" 2>/dev/null || true
+    printf '%s' "$fp_at_entry" >"$tag" 2>/dev/null || true
     return 0
   fi
   return 1

@@ -49,18 +49,13 @@ _sentinel_path() {
 }
 
 @test "hooks::installed cache hit avoids re-parsing settings" {
-  # Sentinel-cache contract: when the sentinel's recorded mtime is >= the
-  # settings file's current mtime, hooks::installed returns success
-  # WITHOUT reading the file. Stage a sentinel for an unwired settings
-  # file to prove the cache short-circuits the verification.
+  # Sentinel-cache contract: when the sentinel's recorded fingerprint
+  # matches the settings file's current fingerprint, hooks::installed
+  # returns success WITHOUT running the jq verifier. Stage a sentinel for
+  # an unwired settings file to prove the cache short-circuits the check.
   _write_unwired_settings
-  current_mtime="$(date -r "$CLAUDE_SETTINGS" +%s 2>/dev/null \
-    || stat -c %Y "$CLAUDE_SETTINGS" 2>/dev/null \
-    || stat -f %m "$CLAUDE_SETTINGS")"
-  # Plant a sentinel claiming "verified at current mtime". If the cache
-  # short-circuits as designed, hooks::installed returns 0 even though jq
-  # would actually return 1.
-  printf '%s' "$current_mtime" >"$(_sentinel_path)"
+  current_fp="$(_hooks_fingerprint "$CLAUDE_SETTINGS")"
+  printf '%s' "$current_fp" >"$(_sentinel_path)"
   run hooks::installed
   assert_success
 }
@@ -85,31 +80,28 @@ _sentinel_path() {
   assert_failure
 }
 
-@test "hooks::installed survives a corrupted sentinel (non-numeric content)" {
+@test "hooks::installed survives a corrupted sentinel" {
   _write_wired_settings
   hooks::clear_sentinel
-  # Write garbage into the sentinel. The cache parser must treat it as
-  # mtime=0 and fall through to verification, not panic on the bad input.
-  printf '%s' 'XXX-not-a-number' >"$(_sentinel_path)"
+  # Garbage in the sentinel must NOT match any real fingerprint, so the
+  # cache misses and falls through to verification — no panic on bad input.
+  printf '%s' 'XXX-not-a-fingerprint' >"$(_sentinel_path)"
   run hooks::installed
   assert_success
 }
 
-@test "hooks::installed sentinel stores PRE-jq mtime (TOCTOU regression)" {
+@test "hooks::installed sentinel stores PRE-jq fingerprint (TOCTOU regression)" {
   # Regression guard for the captured-mtime bug: the sentinel must record
-  # the settings-file mtime as captured BEFORE jq runs. If jq writes
-  # post-jq mtime instead, a touch landing during jq leaves the sentinel
-  # claiming "verified up to a time later than what was actually
-  # verified", and the next call returns a false-positive cache hit.
+  # the settings-file fingerprint as captured BEFORE jq runs. If a future
+  # change captures it post-jq, an edit landing during jq leaves the
+  # sentinel claiming the post-edit state was verified, and the next call
+  # returns a false-positive cache hit.
   _write_wired_settings
   hooks::clear_sentinel
-  # Snapshot the file mtime we EXPECT the sentinel to record.
-  expected_mtime="$(date -r "$CLAUDE_SETTINGS" +%s 2>/dev/null \
-    || stat -c %Y "$CLAUDE_SETTINGS" 2>/dev/null \
-    || stat -f %m "$CLAUDE_SETTINGS")"
+  expected_fp="$(_hooks_fingerprint "$CLAUDE_SETTINGS")"
   hooks::installed
-  recorded_mtime="$(cat "$(_sentinel_path)")"
-  assert_equal "$recorded_mtime" "$expected_mtime"
+  recorded_fp="$(cat "$(_sentinel_path)")"
+  assert_equal "$recorded_fp" "$expected_fp"
 }
 
 @test "hooks::installed accepts legacy nested-object hook shape" {
@@ -138,6 +130,29 @@ EOF
   # Roll mtime BACKWARD to a fixed historical value and swap to unwired content.
   _write_unwired_settings
   touch -t 200001010000 "$CLAUDE_SETTINGS"
+  run hooks::installed
+  assert_failure
+}
+
+@test "hooks::installed invalidates cache on same-second edit (sub-second tiebreaker)" {
+  # On coarse-mtime filesystems (HFS+, FAT, exFAT) an edit within the same
+  # wall-clock second leaves mtime unchanged. The mtime+crc+size fingerprint
+  # must catch this case: same mtime + different content = different
+  # fingerprint = cache miss = re-verify.
+  _write_wired_settings
+  hooks::clear_sentinel
+  hooks::installed
+  # Capture mtime, swap content, then pin mtime to the captured value to
+  # simulate a same-second edit even on fine-grained filesystems.
+  prev_mtime="$(_hooks_mtime "$CLAUDE_SETTINGS")"
+  _write_unwired_settings
+  # touch -d @<epoch> is GNU; -t YYYYMMDDhhmm.ss is the BSD form.
+  if ! touch -d "@$prev_mtime" "$CLAUDE_SETTINGS" 2>/dev/null; then
+    ts="$(date -r "$prev_mtime" '+%Y%m%d%H%M.%S' 2>/dev/null || true)"
+    if [ -n "$ts" ]; then
+      touch -t "$ts" "$CLAUDE_SETTINGS"
+    fi
+  fi
   run hooks::installed
   assert_failure
 }
